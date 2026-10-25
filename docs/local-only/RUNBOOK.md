@@ -71,6 +71,68 @@ GUIの目視確認と区別して記録する。Rerunは0.15.1で再生する。
 - シリアライズ: `validate_map.py`で非空・有限値・UUID・caption数を検査。
 - VLM: M1合格までは実行しない。M2で接続と異常系を独立検証してからM3へ進む。
 
+## M2: Ollamaを独立検証
+
+既存サービスの `/api/status` が `cloud.disabled=false` だったため、その設定・プロセスを
+変更せず、同じ読み取り可能なモデルファイルを使う一時サーバーを起動した。
+モデルの再取得・量子化指定・`ollama pull` は行っていない。
+
+```bash
+# 別端末: 既存のモデルディレクトリを指定する。空きポート11435を利用。
+CONCEPTGRAPH_OLLAMA_MODELS=/path/to/existing/models \
+  bash scripts/local_only/serve_ollama.sh outputs/local-only/m2/server
+# そのサーバーの /api/status が disabled=true, source=env であることを確認。
+curl --noproxy '*' http://127.0.0.1:11435/api/status
+```
+
+一時サーバーは`OLLAMA_NO_CLOUD=1`を**サーバープロセス**へ設定する。
+`OLLAMA_NOPRUNE=1`で共有済み重みのpruneを禁止し、同時ロード1モデル、コンテキスト8192、
+並列1に制限する。既存の11434サービスはそのまま残す。
+M2/M3終了後に一時サーバーの端末でCtrl-Cし、既存サービスや他のGPUプロセスを停止しない。
+
+```bash
+# M1検出キャッシュから番号付き画像を作成。検出・SAM・OpenCLIPの再実行は不要。
+python scripts/local_only/prepare_vlm_input.py \
+  outputs/local-only/assets/data/Replica/room0/exps/local_detections_0_3_1/detections/frame000000 \
+  outputs/local-only/assets/data/Replica/room0/results/frame000000.jpg \
+  outputs/local-only/m2/input-readable
+
+# 必ず9B→35B。同じinput-readableの画像とラベルを使う。
+mkdir -p outputs/local-only/m2/qwen9b-final outputs/local-only/m2/qwen35b-final
+strace -f -e trace=network -s 160 -o outputs/local-only/m2/qwen9b-final/network.strace \
+  python scripts/local_only/vlm_smoke.py --base-url http://127.0.0.1:11435/v1 \
+  --model qwen3.5:9b --input outputs/local-only/m2/input-readable \
+  --output outputs/local-only/m2/qwen9b-final
+strace -f -e trace=network -s 160 -o outputs/local-only/m2/qwen35b-final/network.strace \
+  python scripts/local_only/vlm_smoke.py --base-url http://127.0.0.1:11435/v1 \
+  --model qwen3.5:35b --input outputs/local-only/m2/input-readable \
+  --output outputs/local-only/m2/qwen35b-final
+python scripts/local_only/audit_network.py outputs/local-only/m2/server/network.strace
+```
+
+Adapterの既定URLは指定書どおり`http://127.0.0.1:11434/v1`。
+今回は既存サービスの設定により明示的に11435へ上書きする。
+外部URL、クラウド有効/未確認サービス、未インストール/remoteモデルは推論前に拒否。
+OpenAI SDKはダミーキー`ollama-local-only`と`trust_env=False`のHTTPクライアントだけに使用し、
+実キーを読まず、redirect追従・SDK再試行・外部へのfallbackを無効にしている。
+
+3タスクは関係、Caption、同一物体のCaption統合を維持。ローカル版のプロンプトは
+元GPT用のtuple/list出力指示をJSON objectへ変更し、対応schemaもプロンプト内へ明記する。
+`response_format=json_schema`を送るが、実際に不正な応答を観測したため生成時の強制だけを
+信用せず、応答JSON・ID・名前・自己ループ・関係語を必ず再検証する。
+35Bが有効JSONを単一のMarkdown fenceで包む応答を実測したため、その外側fenceだけを
+明示的に除去し`normalization=single_json_fence`を記録する。壊れたJSONの修復や部分抽出はしない。
+`reasoning_effort=none`で思考を無効化し、temperature=0、max_tokens=4096。
+
+各`responses/*.json`に実プロンプト・schema・生応答・JSON・画像SHA256・モデルdigest・遅延を保存。
+画像base64を標準出力/応答記録に出さない。失敗は`failed_*.json`と`errors.jsonl`に保存して例外送出。
+有効な出力だけcacheし、モデルdigest・プロンプト・画像・ラベル・設定が異なれば再利用しない。
+`vlm_smoke.py`自体は比較のためcacheを使わない。`summary.json`、`ps.json`、`ollama-ps.txt`、
+`nvidia-smi.txt`がGPU実測と結果の証拠となる。
+
+参考: [Ollama公式FAQ](https://docs.ollama.com/faq)、
+[使用バージョンのOpenAI互換変換実装](https://github.com/ollama/ollama/blob/v0.30.10/openai/openai.go)。
+
 ## 実行結果
 
 M0: 合格、commit `b5d041d`。詳細はENVIRONMENT.md。
@@ -88,7 +150,10 @@ GUIの目視確認は未実施で、Rerun保存・構造検査を代替とする
 最終denoise/filter/mergeと明示的Rerun closeを含めて実行した。
 単体テストは7件合格 (`outputs/local-only/m1/unit.log`)。
 実験入力と4つの重みファイルのSHA256は `outputs/local-only/assets/manifest.json` に保存。
-M2/M3: M1合格を確認済み、これから実装・検証する。
+**M2: 合格**。9B→35Bの順で同一画像を使用し、両方で20件のCaption、有効な関係と統合Caption、
+100% GPUロードを確認。結果・遅延・digestとモデル別失敗履歴は [RESULTS.md](RESULTS.md)。
+クライアントと一時サーバーのsyscall監査は127.0.0.1のみ。
+単体テスト26件合格。M3はこれから統合・検証する。
 
 観測した問題と対応 (失敗を合格として扱わない):
 

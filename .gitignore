@@ -8,6 +8,9 @@ manipulation/contact_graspnet/checkpoints
 manipulation/dataset
 
 outputs
+
+# Generated local class palettes (also embedded in saved maps).
+conceptgraph/*_classes_colors.json
 wandb
 
 # Byte-compiled / optimized / DLL files

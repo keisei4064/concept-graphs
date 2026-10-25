@@ -219,6 +219,10 @@ def annotate_for_vlm(
         (text_width, text_height), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, text_scale, text_thickness)
         text_x_left = x_center - text_width // 2
         text_y_top = y_center + (text_height) // 2
+        # A clipped leading digit can turn e.g. "28" into "8" for the VLM.
+        text_x_left = max(2, min(text_x_left, image.shape[1] - text_width - 2))
+        text_y_top = max(text_height + baseline + 2,
+                         min(text_y_top, image.shape[0] - 2))
         
         # Create a rectangle sub-image for the text background
         b_pad = 2 # background rectangle padding

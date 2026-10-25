@@ -165,6 +165,9 @@ def encode_image_for_openai(image_path: str, resize = False, target_size: int=51
     return encoded_image
 
 def consolidate_captions(client: OpenAI, captions: list):
+    from conceptgraph.utils.ollama_vlm import LocalOllamaClient
+    if isinstance(client, LocalOllamaClient):
+        return client.consolidate(captions)
     # Formatting the captions into a single string prompt
     captions_text = "\n".join([f"{cap['caption']}" for cap in captions if cap['caption'] is not None])
     user_query = f"Here are several captions for the same object:\n{captions_text}\n\nPlease consolidate these into a single, clear caption that accurately describes the object."
@@ -258,6 +261,9 @@ def vlm_extract_object_captions(text: str):
         return []
     
 def get_obj_rel_from_image_gpt4v(client: OpenAI, image_path: str, label_list: list):
+    from conceptgraph.utils.ollama_vlm import LocalOllamaClient
+    if isinstance(client, LocalOllamaClient):
+        return client.relations(image_path, label_list)
     # Getting the base64 string
     base64_image = encode_image_for_openai(image_path)
     
@@ -311,6 +317,9 @@ def get_obj_rel_from_image_gpt4v(client: OpenAI, image_path: str, label_list: li
 
     
 def get_obj_captions_from_image_gpt4v(client: OpenAI, image_path: str, label_list: list):
+    from conceptgraph.utils.ollama_vlm import LocalOllamaClient
+    if isinstance(client, LocalOllamaClient):
+        return client.captions(image_path, label_list)
     # Getting the base64 string
     base64_image = encode_image_for_openai(image_path)
     

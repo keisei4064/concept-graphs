@@ -9,6 +9,7 @@ import supervision as sv
 from conceptgraph.slam.slam_classes import MapEdgeMapping, MapObjectList
 from conceptgraph.slam.utils import filter_gobs, make_detection_list_from_pcd_and_gobs, process_edges
 from conceptgraph.utils.general_utils import make_vlm_edges_and_captions
+from conceptgraph.utils.general_utils import annotate_for_vlm
 from conceptgraph.utils.vlm import empty_captions
 from conceptgraph.utils.model_utils import compute_clip_features_batched
 
@@ -69,3 +70,21 @@ def test_no_detections_do_not_invoke_clip():
         np.zeros((20, 20, 3), np.uint8), sv.Detections.empty(), model, None, None, [], "cpu")
     assert crops == text == [] and features.shape == (0, 8)
     model.encode_image.assert_not_called()
+
+
+def test_annotation_keeps_leading_id_inside_image(monkeypatch):
+    import cv2
+    calls = []
+    real_put_text = cv2.putText
+    def record(image, text, origin, *args, **kwargs):
+        calls.append((text, origin))
+        return real_put_text(image, text, origin, *args, **kwargs)
+    monkeypatch.setattr(cv2, 'putText', record)
+    mask = np.zeros((100, 300), dtype=bool)
+    mask[20:80, :10] = True
+    detections = sv.Detections(xyxy=np.array([[0., 20., 10., 80.]]), mask=mask[None],
+                               class_id=np.array([0]), confidence=np.array([1.]))
+    classes = Mock()
+    classes.get_class_color.return_value = [1, 0, 0]
+    annotate_for_vlm(np.zeros((100, 300, 3), np.uint8), detections, classes, ['poster 28'])
+    assert calls and all(text == '28: poster' and x >= 0 and y >= 0 for text, (x, y) in calls)
