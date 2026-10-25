@@ -714,7 +714,7 @@ def filter_objects(
     print("After filtering:", len(new_objects))
 
     # Update edges if provided
-    if map_edges and new_index_map:
+    if map_edges is not None:
         map_edges.update_indices(new_index_map, new_objects)
 
     return new_objects
@@ -735,9 +735,9 @@ def merge_objects(
     map_edges = None,
 ):
     if len(objects) == 0:
-        return objects
+        return (objects, map_edges) if do_edges else objects
     if merge_overlap_thresh <= 0:
-        return objects
+        return (objects, map_edges) if do_edges else objects
 
     # Assuming compute_overlap_matrix requires only `objects` and `downsample_voxel_size`
     overlap_matrix = compute_overlap_matrix_general(
@@ -777,8 +777,8 @@ def merge_objects(
     
     # if map_edges is not None:
     if do_edges:
-        map_edges.merge_update_indices(index_updates)
         map_edges.update_objects_list(objects)
+        map_edges.merge_update_indices(index_updates)
         print("After merging:", len(objects))
 
     # if map_edges is not None:
@@ -1369,7 +1369,7 @@ def prepare_objects_save_vis(objects: MapObjectList, downsample_size: float=0.02
                 
     return objects_to_save.to_serializable()
 
-def process_edges(match_indices, gobs, initial_objects_count, objects, map_edges, frame_idx):
+def process_edges(match_indices, gobs, initial_objects_count, objects, map_edges, frame_idx, detection_labels=None):
     # Step 1: Generate match_indices_w_new_obj with indices for new objects
     # Initial count of objects before processing new detections
     new_object_count = 0  # Counter for new objects
@@ -1387,7 +1387,9 @@ def process_edges(match_indices, gobs, initial_objects_count, objects, map_edges
 
     # Step 2: Create a mapping from detection_class_labels numbers to the detection_list indices
     detection_label_to_index = {}
-    for index, detection_class_label in enumerate(gobs['detection_class_labels']):
+    for index, detection_class_label in enumerate(
+        detection_labels if detection_labels is not None else gobs['detection_class_labels']
+    ):
         label_key = detection_class_label.split(" ")[-1]
         detection_label_to_index[label_key] = index
     
@@ -1400,8 +1402,10 @@ def process_edges(match_indices, gobs, initial_objects_count, objects, map_edges
         
         # check that the object indices are not out of range
         if (obj1_index is None) or (obj1_index >= len(match_indices_w_new_obj)):
+            logging.info("Dropping frame relation %s: source removed by geometry/filter", edge)
             continue
         if (obj2_index is None) or (obj2_index >= len(match_indices_w_new_obj)):
+            logging.info("Dropping frame relation %s: target removed by geometry/filter", edge)
             continue
         
         # Directly map 2D detection indices to object list indices using match_indices_w_new_obj
@@ -1409,6 +1413,8 @@ def process_edges(match_indices, gobs, initial_objects_count, objects, map_edges
         obj2_objects_index = match_indices_w_new_obj[obj2_index] if obj2_index is not None else None
         
         if obj1_objects_index >= len(objects) or obj2_objects_index >= len(objects):
+            if detection_labels is not None:
+                raise IndexError(f"Invalid 2D-to-3D association for relation {edge}")
             continue
 
         curr_edges_3d_by_index.append((obj1_objects_index, relation, obj2_objects_index))

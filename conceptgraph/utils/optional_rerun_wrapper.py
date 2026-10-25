@@ -295,7 +295,7 @@ def orr_log_objs_pcd_and_bbox(objects, obj_classes):
     counter += 1
         
         
-def orr_log_edges(objects, map_edges, obj_classes):
+def orr_log_edges(objects, map_edges, obj_classes, min_detections=2):
     
     # first clear all edges 
     orr.log(
@@ -307,7 +307,7 @@ def orr_log_edges(objects, map_edges, obj_classes):
         obj1_idx, obj2_idx = map_edge_tuple[0]
         map_edge = map_edge_tuple[1]
         num_dets = map_edge.num_detections
-        if num_dets <= 1:
+        if num_dets < min_detections:
             continue
         obj1_label = f"{objects[obj1_idx]['curr_obj_num']}"
         obj2_label = f"{objects[obj2_idx]['curr_obj_num']}"

@@ -84,4 +84,7 @@ python scripts/local_only/m0_smoke.py
   `pip-dependencies.log`, `pip-isolated.log`, `pip-editable.log`。
 - 全Condaパッケージ・pip freeze・開始時GPU/モデル一覧も同じGit追跡外ディレクトリに保存。
 
-M1/M2/M3はこのM0合格時点では未実行。各結果は `RUNBOOK.md` に追記する。
+M1/M2/M3の結果は [RUNBOOK.md](RUNBOOK.md) と [RESULTS.md](RESULTS.md) に記録した。
+M2/M3で追加のパッケージ導入・Toolkit変更は行っていない。
+JSON検証の直接依存`jsonschema==4.26.0`はM0時点でOpen3D経由で導入済みで、lockにも含まれる。
+最終の保護ファイルSHA256検査は全件不変。既存Ollamaサービスを変更せず、一時サーバーのみ終了した。

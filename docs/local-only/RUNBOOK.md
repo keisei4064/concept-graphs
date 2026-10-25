@@ -133,6 +133,66 @@ OpenAI SDKはダミーキー`ollama-local-only`と`trust_env=False`のHTTPクラ
 参考: [Ollama公式FAQ](https://docs.ollama.com/faq)、
 [使用バージョンのOpenAI互換変換実装](https://github.com/ollama/ollama/blob/v0.30.10/openai/openai.go)。
 
+## M3: ローカルScene Graph
+
+M1/M2合格後に同じ一時サーバーを使い、下記で完走を確認した。
+`rerun_local_scene_graph`はReplica構成を継承し、VLMと全エッジ表示を有効にする。
+
+```bash
+# 通常はM1の3フレーム検出キャッシュをそのまま使う。
+bash scripts/local_only/run_mapping.sh outputs/local-only/m3/new-qwen35b \
+  --config-name=rerun_local_scene_graph exp_suffix=m3_new_qwen35b end=3 stride=1 \
+  vlm.base_url=http://127.0.0.1:11435/v1 vlm.model=qwen3.5:35b
+
+# 9Bへ切り替えても検出・SAM・OpenCLIPを再実行しない。
+bash scripts/local_only/run_mapping.sh outputs/local-only/m3/new-qwen9b \
+  --config-name=rerun_local_scene_graph exp_suffix=m3_new_qwen9b end=3 stride=1 \
+  vlm.base_url=http://127.0.0.1:11435/v1 vlm.model=qwen3.5:9b
+```
+
+実測合格した保存物 (`MAP`には次のどちらかを指定):
+
+- `outputs/local-only/assets/data/Replica/room0/exps/m3_qwen35b_complete/pcd_m3_qwen35b_complete.pkl.gz`
+- `outputs/local-only/assets/data/Replica/room0/exps/m3_qwen9b/pcd_m3_qwen9b.pkl.gz`
+
+```bash
+MAP=outputs/local-only/assets/data/Replica/room0/exps/m3_qwen35b_complete/pcd_m3_qwen35b_complete.pkl.gz
+python scripts/local_only/validate_map.py "$MAP" --require-edges
+python scripts/local_only/render_scene_graph.py "$MAP" outputs/local-only/scene_graph.png
+# 保存済みmapから全エッジを再記録できる。Ollama不要、VLM再実行なし。
+RERUN_ANALYTICS_ENABLED=false python scripts/local_only/replay_rerun.py \
+  "$MAP" outputs/local-only/scene_graph_full.rrd --min-edge-detections 1
+RERUN_ANALYTICS_ENABLED=false rerun print --verbose outputs/local-only/scene_graph_full.rrd
+# GUIで目視する場合
+rerun outputs/local-only/scene_graph_full.rrd
+```
+
+実走と同様にsyscallまで監査する場合、`replay_rerun.py`を
+`strace -f -e trace=network -s 160 -o <trace>`で起動し、`audit_network.py <trace>`で確認する。
+実測済みの全エッジ記録とPNGは`outputs/local-only/m3/qwen35b-complete/`と`m3/qwen9b/`の
+`scene_graph_full.rrd` / `scene_graph.png`。各`replay-structure.txt`が読込・構造検査の証拠。
+
+元Rerun helperは観測1回のエッジを隠すため、初回35Bの3エッジ中表示されたのは観測2回の1件、
+9Bの1エッジは非表示だった。再記録では閾値1を明示して全エッジを構造検証した。
+以後のScene Graph構成も`rerun_edge_min_detections: 1`を明示する。元のhelper既定値2は保持し、
+点群/関係の採否、保存された観測数、推定アルゴリズムは変更しない。
+
+キャッシュに関する実測と制約:
+
+- 3フレームの検出、SAM mask、OpenCLIP特徴を再利用。正常実走ログの
+  `NOT Running detections...`と、24 raw cacheファイルのSHA256不変を確認。
+- 9Bは`local_detections_without_vlm`を使用し、`labels/edges/captions/detection_class_labels`の
+  4フィールドを除いた実キャッシュで完走した。元キャッシュを削除・改変せずhardlinkで作成し、
+  `outputs/local-only/m3/legacy-cache-manifest.json`に対応とhashを保存。
+- VLMフィールドは実行モデルで再生成し、元キャッシュへ書き戻さない。注釈画像も実験ごとに保存。
+  モデルdigestと画像・ラベル・プロンプト・設定が一致した有効応答だけを再利用する。
+- 35B成功実走は先の失敗実験の有効な画像応答cacheを`vlm.log_dir`で再利用した。
+  失敗したCaption統合だけを修正・単体検証し、17物体の統合を完了した。
+- 3D対応付け・融合は安価なので再計算する。既存のframe保存形式は元2D番号や全merge履歴を
+  保持せず、そのまま別モデルの関係を最終物体へ付け直すには追加のreplay実装が必要。
+  今回は原設計を保ち、3D融合キャッシュの完全再生には書き換えない。
+- M3の両モデルは3フレームだけで比較した。100フレームのVLM実行は未実施。
+
 ## 実行結果
 
 M0: 合格、commit `b5d041d`。詳細はENVIRONMENT.md。
@@ -150,10 +210,18 @@ GUIの目視確認は未実施で、Rerun保存・構造検査を代替とする
 最終denoise/filter/mergeと明示的Rerun closeを含めて実行した。
 単体テストは7件合格 (`outputs/local-only/m1/unit.log`)。
 実験入力と4つの重みファイルのSHA256は `outputs/local-only/assets/manifest.json` に保存。
-**M2: 合格**。9B→35Bの順で同一画像を使用し、両方で20件のCaption、有効な関係と統合Caption、
+**M2: 合格** (`256b848`)。9B→35Bの順で同一画像を使用し、両方で20件のCaption、有効な関係と統合Caption、
 100% GPUロードを確認。結果・遅延・digestとモデル別失敗履歴は [RESULTS.md](RESULTS.md)。
 クライアントと一時サーバーのsyscall監査は127.0.0.1のみ。
-単体テスト26件合格。M3はこれから統合・検証する。
+M2時点の単体テスト26件合格。
+**M3: 合格**。35Bは17物体/61関連検出/3エッジ、9Bは17物体/61関連検出/1エッジ。
+両モデルとも17件の統合Captionを保存し、16物体が複数の有効観測Captionを持つ。
+再ロード時の有限値/ID一意性/Caption名・順序/エッジ端点・方向・UUID辞書を検査。
+Rerun再記録とPNGを生成して構造・図を確認した。GUI目視は未実施。
+最終単体テストは32件合格。通信先は全推論クライアント/一時サーバーで127.0.0.1のみ、
+図・Rerun再記録の通信先はゼロ。一時サーバーだけを終了し、既存Ollamaは元のPID 2105で稼働。
+`m3/safety-after.json`で保護ファイル全件のSHA256不変、一時ポート閉鎖を確認した。
+Driver/Toolkit/system Python/既存Conda環境/bashrc/Ollamaサービスの変更なし。
 
 観測した問題と対応 (失敗を合格として扱わない):
 
@@ -169,3 +237,12 @@ GUIの目視確認は未実施で、Rerun保存・構造検査を代替とする
   明示的なファイルcloseは`disconnect()`へ修正し、100フレーム実走で検証する。
 - supervision 0.20のColorPalette/BoxAnnotator非推奨警告は記録。
   現バージョンでは機能し、無関係なAPI更新は行わない。
+- M3対応付け層: 幾何処理で除外された検出をraw番号のまま配列indexとして参照するずれ、
+  新規物体の追加後の個数を追加前として渡す誤り、filter後のedge内部index、merge後のUUID参照を修正。
+  元の幾何/類似度/対応付け/融合計算を変更せず、識別子と戻り値契約を整合させた。
+- M3 VLM層: `m3/qwen35b` / `m3/qwen35b-final` はCaption統合がschemaを返して停止。
+  有効な視覚応答を保存・再利用し、失敗した2入力の統合だけを独立に再現した。
+  本文のschema記載を統合タスクだけ省いた後、単体2件と全17物体の統合が合格。
+- M3ログ層: 旧HydraのDEBUG設定がSDK request bodyを記録することを初回統合で発見。
+  local-onlyではINFO、OpenAI/httpx/httpcoreはWARNINGに制限した。
+  最終35B/9B実走ログにbase64本文とSDK request optionsがないことを確認した。

@@ -260,8 +260,8 @@ class MapEdgeMapping:
                 if new_key in new_edges_by_index:
                     new_edges_by_index[new_key].num_detections += edge.num_detections
                 else:
-                    edge.obj1 = new_obj1_index  # Update the edge's internal object index reference
-                    edge.obj2 = new_obj2_index
+                    edge.obj1_idx = new_obj1_index
+                    edge.obj2_idx = new_obj2_index
                     new_edges_by_index[new_key] = edge
                     new_edges_by_uuid[new_uuid_key] = edge
 

@@ -66,3 +66,39 @@ temperature 0、max_tokens 4096、thinkingなし、context 8192、量子化は�
 
 この意味的な誤りを隠すためにエッジを手動で作成・置換していない。
 M3でも参照整合性と可視化の合否を、物理的正しさから分けて報告する。
+
+## M3: 保存済み検出を利用したEnd-to-end
+
+両モデルともReplicaの同じ先頭3フレーム (stride 1) を使用した。
+M1のraw検出/マスク/特徴は不変で、3D融合とVLM統合は元の処理順で実行した。
+
+|モデル|物体|関連検出|保存エッジ|統合Caption|複数観測を統合した物体|保存・再ロード・可視化|
+|---|---:|---:|---:|---:|---:|---|
+|qwen3.5:35b|17|61|3|17|16|PASS|
+|qwen3.5:9b|17|61|1|17|16|PASS|
+
+35Bは`.../room0/exps/m3_qwen35b_complete/`、9Bは`.../room0/exps/m3_qwen9b/`に
+元形式pkl.gz、ノード/エッジJSON、設定、対応付けログ、frame metadataを保存。
+`outputs/local-only/m3/summary.json`に集計、各モデルの`map-validation.json`に整合性検査。
+両モデルで画像上の検出ID→3D物体ID→有効なエッジ端点を確認し、Caption名を元class_idと照合した。
+
+Rerunの元観測閾値2では単一観測のエッジが非表示になるため、閾値1で保存地図を再記録した。
+各`m3/<run>/scene_graph_full.rrd`をSDK 0.15.1で読み、点群/box/uuid/frame/関係線を確認。
+同じ保存物から作った`scene_graph.png`も目視した。GUI viewerの操作確認は未実施。
+
+35B最終グラフの関係は `potted plant on top of coffee table` (観測1)、
+`lamp under light switch` (観測2)、`end table under potted plant` (観測1)。
+9Bは `lamp on top of coffee table` (観測1)。これらのうちlamp/遠方のlight switchの関係や、
+支持面の見えないlampと机の関係は物理的関係として支持できない。意味的誤りは残る。
+可視化できること・参照整合性と、意味的正確性を同じ合格判定にしていない。
+
+有効エッジの一部は元のfilter/mergeで消え、最終数はフレーム別のVLM回答数とは一致しない。
+元設計の採否・融合を維持し、都合のよい回答を選んだりエッジを補填したりしていない。
+
+最終ネットワーク監査: M1/M3 VLM無効と描画/再記録は接続先ゼロ、M2/M3推論と
+一時Ollamaサーバーは`127.0.0.1`のみ。APIキー不要、重みの通常実行時ダウンロードなし。
+停止endpointを指定したM1再検証も17物体/61関連検出でPASS。
+保護ファイル全件のSHA256不変と、元Ollamaサービスの稼働継続を確認。
+
+最終テスト32件合格。失敗したJSON/ID/schema echo/対応付けとログの問題、
+キャッシュの制約、再現コマンドは [RUNBOOK.md](RUNBOOK.md) に記載。

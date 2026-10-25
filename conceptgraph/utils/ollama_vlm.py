@@ -150,6 +150,12 @@ class LocalOllamaClient:
             "defined by this schema. No markdown fences or other text. "
             "Preserve the provided IDs and exact label names. Use only visible evidence.\n"
             + json.dumps(task_schema(task, labels)))
+        if task == 'consolidate':
+            # Qwen 35B can echo an inline JSON schema instead of instance data.
+            # The API still receives the schema; the text describes the output value.
+            structured_prompt = (system_prompt + '\nReturn only an object with the property '
+                '"consolidated_caption" and fill its string value with the actual object description. '
+                'No markdown or schema metadata.')
         record = {"task": task, "model": self.model, "digest": self.digest, "base_url": self.base_url,
                   "temperature": self.temperature, "max_tokens": self.max_tokens, "think": False,
                   "system_prompt": structured_prompt, "user_prompt": user_prompt,
@@ -223,11 +229,15 @@ class LocalOllamaClient:
             "Return a JSON object with a captions array.", image_path=image_path, labels=names)
 
     def consolidate(self, captions):
-        from conceptgraph.utils.vlm import system_prompt_consolidate_captions
         evidence = [cap['caption'] for cap in captions if cap['caption']]
         if not evidence:
             with (self.log_dir / 'skipped.jsonl').open('a') as stream:
                 stream.write(json.dumps({"task": "consolidate", "reason": "no observed captions"}) + '\n')
             return None
-        return self.request('consolidate', system_prompt_consolidate_captions,
-                            "Captions for the SAME mapped object: " + json.dumps(evidence))
+        prompt = ("Consolidate observed captions for the SAME physical object into a single concise, "
+                  "accurate description. Keep shared visual details, remove noise and outliers. "
+                  "Return JSON instance data with one string field 'consolidated_caption'. "
+                  "Its value must describe the object, never describe or repeat the JSON schema.")
+        return self.request('consolidate', prompt,
+            "Observed captions: " + json.dumps(evidence) +
+            "\nFill consolidated_caption with a factual sentence describing this object.")

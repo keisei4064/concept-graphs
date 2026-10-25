@@ -37,3 +37,12 @@ clip_pretrained: ${oc.env:CONCEPTGRAPH_CLIP_CHECKPOINT}
 # Unused legacy SAM fields must not retain personal paths in snapshots.
 sam_checkpoint_path: null
 mobile_sam_path: null
+
+vlm:
+  base_url: ${oc.env:CONCEPTGRAPH_OLLAMA_URL,http://127.0.0.1:11434/v1}
+  model: qwen3.5:9b
+  temperature: 0.0
+  timeout: 300
+  max_tokens: 4096
+  reuse_cache: true
+  log_dir: null

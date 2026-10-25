@@ -34,3 +34,4 @@ iopath==0.1.10
 fvcore==0.1.5.post20221221
 pytest==8.2.2
 remotezip==0.12.3
+jsonschema==4.26.0

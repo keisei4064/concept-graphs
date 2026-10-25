@@ -1,0 +1,11 @@
+defaults:
+  - rerun_local_replica
+  - _self_
+
+make_edges: true
+exp_suffix: local_m3_${now:%Y%m%d_%H%M%S}
+# M1's model-independent raw detections, masks and CLIP features are reused.
+# VLM fields are recomputed from the current adapter, never trusted across models.
+force_detection: false
+# Show every saved observation; detection counts remain visible as edge labels.
+rerun_edge_min_detections: 1

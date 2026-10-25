@@ -133,3 +133,12 @@ def test_only_a_single_complete_json_fence_is_normalized():
                     '{"relations": [], "relations": [1]}'):
         with pytest.raises((ValueError, VLMError)):
             parse_json_response(invalid)
+
+
+def test_consolidation_schema_echo_is_logged_and_rejected(tmp_path):
+    schema_echo = json.dumps({'type': 'object', 'properties': {'consolidated_caption': {'type': 'string'}}})
+    client = LocalOllamaClient(log_dir=tmp_path, transport=transport_handler([], schema_echo))
+    with pytest.raises(VLMError):
+        client.consolidate([{'caption': 'A beige stool.'}])
+    assert list(tmp_path.glob('failed_consolidate_*.json'))
+    client.close()

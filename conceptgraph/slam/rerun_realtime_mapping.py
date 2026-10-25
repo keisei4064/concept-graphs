@@ -10,6 +10,7 @@ from pathlib import Path
 import pickle
 import gzip
 import json
+import logging
 
 # Third-party imports
 import cv2
@@ -40,7 +41,7 @@ from conceptgraph.utils.optional_rerun_wrapper import (
 from conceptgraph.utils.optional_wandb_wrapper import OptionalWandB
 from conceptgraph.utils.geometry import rotation_matrix_to_quaternion
 from conceptgraph.utils.logging_metrics import DenoisingTracker, MappingTracker
-from conceptgraph.utils.vlm import consolidate_captions, empty_captions, get_obj_rel_from_image_gpt4v, get_openai_client
+from conceptgraph.utils.vlm import consolidate_captions, empty_captions, get_vlm_client
 from conceptgraph.utils.ious import mask_subtract_contained
 from conceptgraph.utils.general_utils import (
     ObjectClasses, 
@@ -107,11 +108,17 @@ torch.set_grad_enabled(False)
 # @profile
 def main(cfg : DictConfig):
     if cfg.get("local_only", False):
+        # Hydra's legacy DEBUG root would print SDK request bodies (base64 images).
+        logging.getLogger().setLevel(logging.INFO)
+        for logger_name in ("openai", "httpx", "httpcore"):
+            logging.getLogger(logger_name).setLevel(logging.WARNING)
         from conceptgraph.utils import local_runtime
         if not local_runtime._installed:
             raise RuntimeError("Local-only mode requires: python -m conceptgraph.local_only")
         if cfg.use_wandb:
             raise ValueError("Local-only runs require use_wandb=false")
+        from conceptgraph.utils.ollama_vlm import validate_local_endpoint
+        validate_local_endpoint(cfg.vlm.base_url)
     tracker = MappingTracker()
     
     orr = OptionalReRun()
@@ -176,6 +183,9 @@ def main(cfg : DictConfig):
     run_detections = check_run_detections(cfg.force_detection, det_exp_path)
     det_exp_pkl_path = get_det_out_path(det_exp_path)
     det_exp_vis_path = get_vis_out_path(det_exp_path)
+    vlm_vis_path = (get_vis_out_path(exp_out_path) if cfg.get("local_only", False)
+                    and cfg.make_edges else det_exp_vis_path)
+    openai_client = get_vlm_client(cfg, exp_out_path / "vlm") if cfg.make_edges else None
     
     prev_adjusted_pose = None
 
@@ -197,8 +207,6 @@ def main(cfg : DictConfig):
         detection_model.set_classes(obj_classes.get_classes_arr())
     else:
         print("\n".join(["NOT Running detections..."] * 10))
-
-    openai_client = get_openai_client() if cfg.make_edges else None
 
     save_hydra_config(cfg, exp_out_path)
     save_hydra_config(detections_exp_cfg, exp_out_path, is_detection_config=True)
@@ -243,8 +251,8 @@ def main(cfg : DictConfig):
         gobs = None # stands for grounded observations
         detections_path = det_exp_pkl_path / (color_path.stem + ".pkl.gz")
         
-        vis_save_path_for_vlm = get_vlm_annotated_image_path(det_exp_vis_path, color_path)
-        vis_save_path_for_vlm_edges = get_vlm_annotated_image_path(det_exp_vis_path, color_path, w_edges=True)
+        vis_save_path_for_vlm = get_vlm_annotated_image_path(vlm_vis_path, color_path)
+        vis_save_path_for_vlm_edges = get_vlm_annotated_image_path(vlm_vis_path, color_path, w_edges=True)
         
         if run_detections:
             results = None
@@ -280,7 +288,7 @@ def main(cfg : DictConfig):
             )
             
             # Make the edges
-            labels, edges, edge_image, captions = make_vlm_edges_and_captions(image, curr_det, obj_classes, detection_class_labels, det_exp_vis_path, color_path, cfg.make_edges, openai_client)
+            labels, edges, edge_image, captions = make_vlm_edges_and_captions(image, curr_det, obj_classes, detection_class_labels, vlm_vis_path, color_path, cfg.make_edges, openai_client)
 
             image_crops, image_feats, text_feats = compute_clip_features_batched(
                 image_rgb, curr_det, clip_model, clip_preprocess, clip_tokenizer, obj_classes.get_classes_arr(), cfg.device)
@@ -327,11 +335,23 @@ def main(cfg : DictConfig):
             # Support current and old saving formats
             if os.path.exists(det_exp_pkl_path / color_path.stem):
                 raw_gobs = load_saved_detections(det_exp_pkl_path / color_path.stem)
-            elif os.path.exists(det_exp_pkl_path / f"{int(color_path.stem):06}"):
+            elif color_path.stem.isdecimal() and os.path.exists(det_exp_pkl_path / f"{int(color_path.stem):06}"):
                 raw_gobs = load_saved_detections(det_exp_pkl_path / f"{int(color_path.stem):06}")
             else:
                 # if no detections, throw an error
-                raise FileNotFoundError(f"No detections found for frame {frame_idx}at paths \n{det_exp_pkl_path / color_path.stem} or \n{det_exp_pkl_path / f'{int(color_path.stem):06}'}.")
+                raise FileNotFoundError(f"No detections found for frame {frame_idx}: {det_exp_pkl_path / color_path.stem}")
+
+        if cfg.get("local_only", False) and cfg.make_edges and not run_detections:
+            raw_gobs.setdefault('detection_class_labels', [
+                f"{raw_gobs['classes'][class_id]} {index}"
+                for index, class_id in enumerate(raw_gobs['class_id'])])
+            image = cv2.imread(str(color_path))
+            curr_det = sv.Detections(xyxy=raw_gobs['xyxy'], confidence=raw_gobs['confidence'],
+                                    class_id=raw_gobs['class_id'], mask=raw_gobs['mask'])
+            labels, edges, edge_image, captions = make_vlm_edges_and_captions(
+                image, curr_det, obj_classes, raw_gobs['detection_class_labels'],
+                vlm_vis_path, color_path, True, openai_client)
+            raw_gobs.update(labels=labels, edges=edges, captions=captions)
 
         if not cfg.make_edges:
             # Old caches may lack these fields or contain a previous VLM run.
@@ -406,6 +426,7 @@ def main(cfg : DictConfig):
         detection_list = make_detection_list_from_pcd_and_gobs(
             obj_pcds_and_bboxes, gobs, color_path, obj_classes, frame_idx
         )
+        detection_labels = [detection['captions'][0]['id'] for detection in detection_list]
 
         if len(detection_list) == 0: # no detections, skip
             continue
@@ -415,6 +436,11 @@ def main(cfg : DictConfig):
         # then continue, no need to match or merge
         if len(objects) == 0:
             objects.extend(detection_list)
+            if cfg.make_edges:
+                map_edges = process_edges(list(range(len(detection_list))), gobs, 0,
+                    objects, map_edges, frame_idx, detection_labels=detection_labels)
+            orr_log_objs_pcd_and_bbox(objects, obj_classes)
+            orr_log_edges(objects, map_edges, obj_classes, cfg.get("rerun_edge_min_detections", 2))
             if cfg.get("local_only", False):
                 with (exp_out_path / "associations.jsonl").open("a") as log:
                     log.write(json.dumps({"frame": frame_idx, "source": color_path.name,
@@ -486,7 +512,9 @@ def main(cfg : DictConfig):
             if temp_class_name != most_common_class_name:
                 obj["class_name"] = most_common_class_name
 
-        map_edges = process_edges(match_indices, gobs, len(objects), objects, map_edges, frame_idx)
+        map_edges.update_objects_list(objects)
+        map_edges = process_edges(match_indices, gobs, initial_objects_count, objects,
+                                 map_edges, frame_idx, detection_labels=detection_labels)
         is_final_frame = frame_idx == len(dataset) - 1
         if is_final_frame:
             print("Final frame detected. Performing final post-processing...")
@@ -564,7 +592,7 @@ def main(cfg : DictConfig):
                 objects = merge_result
                 map_edges.update_objects_list(objects)
         orr_log_objs_pcd_and_bbox(objects, obj_classes)
-        orr_log_edges(objects, map_edges, obj_classes)
+        orr_log_edges(objects, map_edges, obj_classes, cfg.get("rerun_edge_min_detections", 2))
 
         if cfg.save_objects_all_frames:
             save_objects_for_frame(
@@ -643,7 +671,7 @@ def main(cfg : DictConfig):
             consolidate_captions(openai_client, obj_captions) if cfg.make_edges else None)
 
     orr_log_objs_pcd_and_bbox(objects, obj_classes)
-    orr_log_edges(objects, map_edges, obj_classes)
+    orr_log_edges(objects, map_edges, obj_classes, cfg.get("rerun_edge_min_detections", 2))
     if cfg.get("local_only", False):
         orr.disconnect()
     else:
@@ -691,6 +719,8 @@ def main(cfg : DictConfig):
             save_video_detections(det_exp_path)
 
     owandb.finish()
+    if cfg.get("local_only", False) and openai_client is not None:
+        openai_client.close()
 
 if __name__ == "__main__":
     main()

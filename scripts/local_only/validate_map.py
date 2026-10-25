@@ -7,7 +7,7 @@ import pickle
 
 import numpy as np
 
-from conceptgraph.slam.slam_classes import MapObjectList
+from conceptgraph.slam.slam_classes import MapEdgeMapping, MapObjectList
 
 
 def main():
@@ -37,6 +37,8 @@ def main():
         assert np.isclose(np.linalg.norm(features), 1, atol=1e-4)
         assert len(obj['captions']) == len(obj['image_idx']) == obj['num_detections']
         assert all(set(cap) == {"id", "name", "caption"} for cap in obj['captions'])
+        assert all(cap['name'] == artifact['class_names'][class_id]
+                   for cap, class_id in zip(obj['captions'], obj['class_id']))
         if args.no_vlm:
             assert all(cap['caption'] is None for cap in obj['captions'])
             assert obj['consolidated_caption'] is None
@@ -50,6 +52,13 @@ def main():
     edges = edge_data['edges']
     if edge_data['objects']:
         assert [obj['id'] for obj in edge_data['objects']] == [obj['id'] for obj in objects]
+        reloaded = MapEdgeMapping(MapObjectList())
+        reloaded.load_serializable(edge_data)
+        assert len(reloaded.edges_by_index) == len(edges)
+        for (a, b), edge in reloaded.edges_by_index.items():
+            assert (a, b) == (edge.obj1_idx, edge.obj2_idx)
+            assert (objects[a]['id'], objects[b]['id']) in reloaded.edges_by_uuid
+            assert np.isfinite(reloaded.get_edge_endpoints(a, b)).all()
     for edge in edges:
         a, b = edge['obj1_index'], edge['obj2_index']
         assert isinstance(a, int) and isinstance(b, int) and a != b

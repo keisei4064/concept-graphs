@@ -113,6 +113,18 @@ def get_openai_client():
     )
     return client
 
+
+def get_vlm_client(cfg, log_dir):
+    """Select the local adapter explicitly; it never falls back to the legacy client."""
+    if cfg.get('local_only', False):
+        from conceptgraph.utils.ollama_vlm import LocalOllamaClient
+        settings = cfg.vlm
+        return LocalOllamaClient(base_url=settings.base_url, model=settings.model,
+            log_dir=settings.get('log_dir') or log_dir, temperature=settings.temperature,
+            timeout=settings.timeout, max_tokens=settings.max_tokens,
+            reuse_cache=settings.reuse_cache)
+    return get_openai_client()
+
 # Function to encode the image as base64
 def encode_image_for_openai(image_path: str, resize = False, target_size: int=512):
     print(f"Checking if image exists at path: {image_path}")
