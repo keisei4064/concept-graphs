@@ -201,7 +201,7 @@ M1 少数実走: 3/3フレーム完走、17物体、61関連検出、特徴1024�
 Rerunのframeタイムライン/点群/Bounding Box/uuidの構造検査に合格。
 キャプションはすべてnull、関係は空。APIキーは実行スクリプト内で未設定にする。
 `m1/smoke/network-audit.json`: PASS、インターネット/ループバック宛てconnect/send先ともゼロ。
-GUIの目視確認は未実施で、Rerun保存・構造検査を代替とする。
+M1時点のGUI目視は未実施で、Rerun保存・構造検査を代替とした。後述の追加GUI検証も参照。
 全100フレームのRGB-D/c2w/内部行列/深度スケール/投影往復検査も合格。
 **M1: 合格**。100/100フレームのmappingも完走し、25物体・1980関連検出を保存・再ロード。
 全100フレームが保存物の関連検出に含まれる。特徴・点群・ID・null captions・空edgesの検査に合格。
@@ -217,7 +217,7 @@ M2時点の単体テスト26件合格。
 **M3: 合格**。35Bは17物体/61関連検出/3エッジ、9Bは17物体/61関連検出/1エッジ。
 両モデルとも17件の統合Captionを保存し、16物体が複数の有効観測Captionを持つ。
 再ロード時の有限値/ID一意性/Caption名・順序/エッジ端点・方向・UUID辞書を検査。
-Rerun再記録とPNGを生成して構造・図を確認した。GUI目視は未実施。
+Rerun再記録とPNGを生成して構造・図を確認した。M3コミット時点はGUI未実施だったが、追加検証で表示を確認した。
 最終単体テストは32件合格。通信先は全推論クライアント/一時サーバーで127.0.0.1のみ、
 図・Rerun再記録の通信先はゼロ。一時サーバーだけを終了し、既存Ollamaは元のPID 2105で稼働。
 `m3/safety-after.json`で保護ファイル全件のSHA256不変、一時ポート閉鎖を確認した。
@@ -246,3 +246,26 @@ Driver/Toolkit/system Python/既存Conda環境/bashrc/Ollamaサービスの変�
 - M3ログ層: 旧HydraのDEBUG設定がSDK request bodyを記録することを初回統合で発見。
   local-onlyではINFO、OpenAI/httpx/httpcoreはWARNINGに制限した。
   最終35B/9B実走ログにbase64本文とSDK request optionsがないことを確認した。
+
+## 追加GUI検証 (2026-10-25 JST)
+
+ユーザーのGUI確認希望を受け、X11のデスクトップ上でRerun 0.15.1を実際に起動した。
+35Bの`scene_graph_full.rrd`を開き、GUIの3D点群・box/物体ラベル・関係entityとframe timelineを
+表示できることを画面キャプチャで確認した。通常起動した`Rerun Viewer`はユーザー操作用に開いたまま。
+物理的な関係の意味評価は従来のRESULTS.mdと同じで、この追加確認はGUI表示の確認である。
+
+```bash
+mkdir -p outputs/local-only/gui/config
+XDG_CONFIG_HOME="$PWD/outputs/local-only/gui/config" rerun analytics disable
+XDG_CONFIG_HOME="$PWD/outputs/local-only/gui/config" RERUN_ANALYTICS_ENABLED=false \
+  rerun --bind 127.0.0.1 --port 0 --threads 8 --window-size 1440x1000 \
+  outputs/local-only/m3/qwen35b-complete/scene_graph_full.rrd
+```
+
+既存のRerun設定を変更しないよう、専用の`XDG_CONFIG_HOME`でanalyticsを無効化した。
+`outputs/local-only/gui/rerun35b.png`が実際のGUI画面、`verification.json`がウィンドウ確認記録。
+GUIプロセスも`strace`で監査し、`viewer-network-audit.json`は外部接続先なし。
+
+`--screenshot-to`では画像の保存後、自動終了処理でRerun内部の`Option::unwrap()` panicを観測した。
+通常起動では再現せず、画面表示とウィンドウの継続稼働を確認した。
+Vulkanの`Unrecognized present mode`警告も記録したが、Driver/Toolkit/依存バージョンは変更していない。

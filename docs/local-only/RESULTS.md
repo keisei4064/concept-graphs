@@ -11,7 +11,7 @@ M1は原ali-devのYOLO-World/SAM-L/ViT-H-14 OpenCLIPと幾何・対応付け・�
 |room0先頭100フレーム、stride 1|25|1980|なし|PASS|
 
 全入力のRGB-D組、depth scale、intrinsics、c2w、投影往復は検査済み。
-Rerunは記録ファイル・timeline/点群/box/IDの構造検査であり、GUI目視は未実施。
+M1時点のRerun検証は記録ファイル・timeline/点群/box/IDの構造検査。追加GUI検証は末尾に記載。
 元実装の物体分類・融合の精度を保証する検証ではない。
 
 ## M2: 独立した実画像テスト
@@ -84,7 +84,7 @@ M1のraw検出/マスク/特徴は不変で、3D融合とVLM統合は元の処�
 
 Rerunの元観測閾値2では単一観測のエッジが非表示になるため、閾値1で保存地図を再記録した。
 各`m3/<run>/scene_graph_full.rrd`をSDK 0.15.1で読み、点群/box/uuid/frame/関係線を確認。
-同じ保存物から作った`scene_graph.png`も目視した。GUI viewerの操作確認は未実施。
+同じ保存物から作った`scene_graph.png`も目視した。この時点ではGUI viewerは未確認だったが、追加検証で表示を確認した。
 
 35B最終グラフの関係は `potted plant on top of coffee table` (観測1)、
 `lamp under light switch` (観測2)、`end table under potted plant` (観測1)。
@@ -102,3 +102,10 @@ Rerunの元観測閾値2では単一観測のエッジが非表示になるた�
 
 最終テスト32件合格。失敗したJSON/ID/schema echo/対応付けとログの問題、
 キャッシュの制約、再現コマンドは [RUNBOOK.md](RUNBOOK.md) に記載。
+
+## 追加のGUI表示確認
+
+2026-10-25、ユーザーの希望により35B保存地図をRerun 0.15.1のネイティブGUIで開き、
+実際の描画を`outputs/local-only/gui/rerun35b.png`で確認した。
+通常起動のRerun Viewerは開いたままで、ユーザーが回転・拡大やentity表示切り替えを操作できる。
+外部通信なし、既存設定への変更なし。自動スクリーンショット終了時のpanicと通常起動の区別はRUNBOOKに記録した。
