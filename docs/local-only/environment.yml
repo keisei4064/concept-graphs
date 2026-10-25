@@ -1,0 +1,7 @@
+name: conceptgraph-local
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+# See ENVIRONMENT.md for CUDA wheels and the pinned pip requirements.
