@@ -269,3 +269,39 @@ GUIプロセスも`strace`で監査し、`viewer-network-audit.json`は外部接
 `--screenshot-to`では画像の保存後、自動終了処理でRerun内部の`Option::unwrap()` panicを観測した。
 通常起動では再現せず、画面表示とウィンドウの継続稼働を確認した。
 Vulkanの`Unrecognized present mode`警告も記録したが、Driver/Toolkit/依存バージョンは変更していない。
+
+## 読みやすいScene Graph表示
+
+点群・全ラベルの重ね描きは関係を読み取りにくいため、保存mapから2Dのノード・矢印図を作る経路を追加した。
+新しい推論・検出・融合は行わない。Graphvizの`dot` (既存インストールを使用) でPNG/SVGを生成する。
+
+```bash
+MAP=outputs/local-only/assets/data/Replica/room0/exps/m3_qwen35b_complete/pcd_m3_qwen35b_complete.pkl.gz
+python scripts/local_only/draw_relation_graph.py "$MAP" outputs/local-only/relations35b
+# 全17物体も図に含める場合 (既定は関係のある5物体に絞る)
+python scripts/local_only/draw_relation_graph.py "$MAP" outputs/local-only/relations35b-all --include-isolated
+
+# 左: 2D関係図、右: 物体中心と矢印の3D表示、薄い点群を背景として記録する。
+RERUN_ANALYTICS_ENABLED=false python scripts/local_only/replay_rerun.py "$MAP" \
+  outputs/local-only/scene_graph_readable.rrd --presentation
+XDG_CONFIG_HOME="$PWD/outputs/local-only/gui/config" RERUN_ANALYTICS_ENABLED=false \
+  rerun --bind 127.0.0.1 --port 0 --threads 8 outputs/local-only/scene_graph_readable.rrd
+```
+
+実際に生成・GUI表示を確認したファイル:
+
+- `outputs/local-only/presentation/scene_graph_readable_diagram/relations.png` / `.svg`: 35B、5ノード・3エッジ。
+- 同ディレクトリの`objects.json`: 全17物体とCaption、`isolated_objects.txt`: 関係のない12物体。
+- `outputs/local-only/presentation/qwen9b/relations.png` / `.svg`: 9B、2ノード・1エッジ。
+- `outputs/local-only/presentation/scene_graph_readable.rrd`: 2D/3Dの左右分割blueprintを含む。
+- `outputs/local-only/presentation/viewer.png`: 新しい左右分割GUIの実画面。
+
+ノードの番号は保存物体ID、矢印はsource→target、括弧内は保存された関係の観測回数。
+観測回数は正解確率ではない。SVG上ではノードのtooltipから統合Captionを参照できる。
+関係のない物体を省くのは表示上の選択だけで、保存グラフにはノード・エッジを追加/削除しない。
+SVGのノード/矢印数と保存データを照合し、Rerunのblueprint・矢印記録も検査した。
+生成時・GUIとも外部通信なし。初回はOptionalReRun wrapper経由の定数参照で失敗したため、
+ViewCoordinates定数のみSDKを直接参照するよう修正した。元の表示経路は引き続き利用可能。
+
+既存の`visualize_cfslam_results.py`にも`G`キーで球/線のグラフを切り替える機能があるが、
+古い`object1/object2/object_relation`形式のedge JSONを前提とするため、そのまま今回のmapへは使わない。
