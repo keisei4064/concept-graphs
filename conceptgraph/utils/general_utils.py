@@ -11,7 +11,7 @@ from conceptgraph.slam.utils import prepare_objects_save_vis
 from conceptgraph.utils.ious import mask_subtract_contained
 import supervision as sv
 import scipy.ndimage as ndi 
-from conceptgraph.utils.vlm import get_obj_captions_from_image_gpt4v, get_obj_rel_from_image_gpt4v, vlm_extract_object_captions
+from conceptgraph.utils.vlm import empty_captions, get_obj_captions_from_image_gpt4v, get_obj_rel_from_image_gpt4v, vlm_extract_object_captions
 import cv2
 import re
 
@@ -384,6 +384,9 @@ def filter_detections(
         if keep:
             filtered_detections.append(current_det)
 
+    if not filtered_detections:
+        return detections[np.zeros(len(detections), dtype=bool)], []
+
     # Unzip the filtered results
     confidences, class_ids, xyxy, masks, indices = zip(*filtered_detections)
     filtered_labels = [given_labels[i] for i in indices]
@@ -432,6 +435,11 @@ def make_vlm_edges_and_captions(image, curr_det, obj_classes, detection_class_la
             - edge_image (numpy.ndarray): Annotated image with edges plotted if `make_edges_flag` is True, otherwise None.
             - captions (list): List of captions for each detected object if `make_edges_flag` is True, otherwise None.
     """
+    # Disabled VLM must preserve all detection indices and never need a client.
+    captions = empty_captions(detection_class_labels)
+    if not make_edges_flag:
+        return list(detection_class_labels), [], None, captions
+
     # Filter the detections
     filtered_detections, labels = filter_detections(
         image=image,
@@ -444,7 +452,7 @@ def make_vlm_edges_and_captions(image, curr_det, obj_classes, detection_class_la
     
     edges = []
     edge_image = None
-    if make_edges_flag:
+    if make_edges_flag and labels:
         vis_save_path_for_vlm = get_vlm_annotated_image_path(det_exp_vis_path, color_path)
         vis_save_path_for_vlm_edges = get_vlm_annotated_image_path(det_exp_vis_path, color_path, w_edges=True)
         annotated_image_for_vlm, sorted_indices = annotate_for_vlm(image, filtered_detections, obj_classes, labels, save_path=vis_save_path_for_vlm)

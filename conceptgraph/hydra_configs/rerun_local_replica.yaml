@@ -1,0 +1,39 @@
+defaults:
+  - rerun_realtime_mapping
+  - replica
+  - _self_
+
+# Required input locations are supplied by the caller, never a developer's path.
+repo_root: ${oc.env:CONCEPTGRAPH_REPO_ROOT}
+data_root: ${oc.env:CONCEPTGRAPH_DATA_ROOT}
+model_root: ${oc.env:CONCEPTGRAPH_MODEL_ROOT}
+dataset_root: ${data_root}/Replica
+scene_id: room0
+local_only: true
+make_edges: false
+use_wandb: false
+use_rerun: true
+save_rerun: true
+rerun_spawn: false
+
+start: 0
+end: 3
+stride: 1
+exp_suffix: local_m1_${now:%Y%m%d_%H%M%S}
+detections_exp_suffix: local_detections_${start}_${end}_${stride}
+force_detection: false
+save_detections: true
+save_video: false
+vis_render: false
+debug_render: false
+save_objects_all_frames: true
+latest_pcd_filepath: null
+
+# Same models as ali-dev; only their locations become configurable.
+detection_model_path: ${model_root}/yolov8l-world.pt
+sam_model_path: ${model_root}/sam_l.pt
+clip_model_name: ViT-H-14
+clip_pretrained: ${oc.env:CONCEPTGRAPH_CLIP_CHECKPOINT}
+# Unused legacy SAM fields must not retain personal paths in snapshots.
+sam_checkpoint_path: null
+mobile_sam_path: null

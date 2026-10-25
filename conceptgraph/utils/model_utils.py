@@ -131,6 +131,8 @@ def compute_clip_features(image, detections, clip_model, clip_preprocess, clip_t
 
 # @profile
 def compute_clip_features_batched(image, detections, clip_model, clip_preprocess, clip_tokenizer, classes, device):
+    if len(detections.xyxy) == 0:
+        return [], np.empty((0, clip_model.visual.output_dim), dtype=np.float32), []
     
     image = Image.fromarray(image)
     padding = 20  # Adjust the padding amount as needed

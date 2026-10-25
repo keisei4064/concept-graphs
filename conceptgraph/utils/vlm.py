@@ -102,6 +102,11 @@ system_prompt = system_prompt_only_top
 # gpt_model = "gpt-4-vision-preview"
 gpt_model = "gpt-4o-2024-05-13"
 
+def empty_captions(detection_class_labels):
+    """Keep one caption per original detection, including labels filtered for VLM."""
+    return [{"id": label.rsplit(" ", 1)[1], "name": label.rsplit(" ", 1)[0],
+             "caption": None} for label in detection_class_labels]
+
 def get_openai_client():
     client = OpenAI(
         api_key=os.getenv('OPENAI_API_KEY')

@@ -14,7 +14,7 @@
 |GPU|NVIDIA RTX 6000 Ada Generation / capability 8.9 / 49140 MiB|
 |Driver|580.196.07 (`nvidia-smi` の CUDA 表示は 13.0)|
 |ホスト Toolkit|nvcc 13.0.88|
-|専用環境|新規 `conceptgraph-local` / Python 3.10|
+|専用環境|新規 `conceptgraph-local` / Python 3.10.22|
 |PyTorch / torchvision|2.0.1+cu118 / 0.15.2+cu118|
 |PyTorch CUDA runtime|11.8 (`torch.version.cuda`)|
 |PyTorch3D|0.7.4 / 公式 py310_cu118_pyt201 wheel|
