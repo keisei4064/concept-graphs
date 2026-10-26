@@ -18,7 +18,15 @@ export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
 export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-8}
 unset OPENAI_API_KEY ANTHROPIC_API_KEY
 date --iso-8601=seconds > "$run_dir/started.txt"
-git rev-parse HEAD > "$run_dir/commit.txt"
+# User requested no Git operations. Capture the executed sources directly instead.
+python3 - "$run_dir/source-state.json" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+paths = list(Path('conceptgraph').rglob('*.py')) + list(Path('conceptgraph/hydra_configs').rglob('*.yaml'))
+paths += list(Path('scripts/local_only').glob('*.py')) + list(Path('scripts/local_only').glob('*.sh'))
+Path(sys.argv[1]).write_text(json.dumps({str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+                                       for p in sorted(paths)}, indent=2))
+PY
 nvidia-smi > "$run_dir/nvidia-before.txt"
 printf '%s\n' "$@" > "$run_dir/overrides.txt"
 echo "Starting mapping; logs: $run_dir; launcher PID: $$"

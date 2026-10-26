@@ -136,7 +136,9 @@ OpenAI SDKはダミーキー`ollama-local-only`と`trust_env=False`のHTTPクラ
 ## M3: ローカルScene Graph
 
 M1/M2合格後に同じ一時サーバーを使い、下記で完走を確認した。
-`rerun_local_scene_graph`はReplica構成を継承し、VLMと全エッジ表示を有効にする。
+`rerun_local_scene_graph`はReplica構成を継承し、VLMを有効にする。
+現在の既定は全区間・stride 10、関係表示は元と同じ観測2回以上。
+下の小規模検証では`end=3 stride=1`を明示する。
 
 ```bash
 # 通常はM1の3フレーム検出キャッシュをそのまま使う。
@@ -305,3 +307,103 @@ ViewCoordinates定数のみSDKを直接参照するよう修正した。元の�
 
 既存の`visualize_cfslam_results.py`にも`G`キーで球/線のグラフを切り替える機能があるが、
 古い`object1/object2/object_relation`形式のedge JSONを前提とするため、そのまま今回のmapへは使わない。
+
+## room0の実行管理と現在の結果
+
+| 段階 | 結果 |
+|---|---|
+| RGB-D取得 | 全2000組を取得し、CRC・幾何検証に合格 |
+| stride 20・100枚pilot | 61物体・25関係・1931対応検出、1146.5秒 |
+| 全2000枚の検出 | 完了、71物体・37491対応検出 |
+| 全2000枚のScene Graph | frame000099で停止。再開保留 |
+| stride 10・200枚reference | 73物体・39関係・3805対応検出、1803.5秒。問題付き完了 |
+
+`scripts/local_only/run_full_room0.py`は、通常モードではpilot検出→pilot graph→全検出→全graphを実行する。
+`--reference-only`はstride 10の200枚graphだけを実行し、2000枚段階へ進まない。
+検出/VLMキャッシュと検証済み段階を再利用するが、失敗段階の融合は先頭から再計算する。
+旧方針のgraphを現在の`upstream`方針で検証済みとは扱わない。
+
+状態・証拠:
+
+- `outputs/local-only/full_room0/state.json`: 旧2000枚実験の停止状態。
+- `outputs/local-only/reference_room0/state.json`: 200枚実験の問題付き完了。
+- 各rootの`resources.jsonl`: GPU・RAM・ディスク推移。
+- 各rootの`<stage>/attemptN/`: 設定・ソースSHA256・監査・検証ログ。
+- `outputs/local-only/assets/data/Replica/room0/exps/room0_<stage>_attemptN/`: 地図・元RRD・進捗・完了記録。
+
+200枚実験で使用したコマンド（実行済み。再実行する必要はない）:
+
+```bash
+PYTHONPATH= PYTHONNOUSERSITE=1 OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 \
+  conda run --no-capture-output -n conceptgraph-local \
+  python scripts/local_only/run_full_room0.py --reference-only \
+  --root outputs/local-only/reference_room0 \
+  --ollama-models /usr/share/ollama/.ollama/models
+```
+
+同じrootの検証済み段階は再利用される。別rootだけを指定しても、実験名の完全な分離にはならないため、
+新規比較を行う際は`exp_suffix`と出力先の衝突も確認する。
+`--ollama-models`はこのPCの既存モデル配置。再ダウンロードはしない。
+一時Ollamaは127.0.0.1:11435、クラウド無効、context 16384。既存サービスは変更しない。
+実行ラッパーはGitコマンドの代わりに実行ソースのSHA256を記録する。
+
+明示的な全2000枚の設定は`rerun_local_room0_full.yaml`（stride 1）。
+250フレームごとに関係を含む地図を原子的に保存し、巨大なフレーム別pklは作らない。
+全2000枚の再開はユーザーが見積もりを聞いて判断する方針で、現在は行わない。
+
+## 現在のローカルVLMモード
+
+既定は`vlm.response_policy=upstream`、出力検証を理由とした自動再生成は0回。
+元のタスクプロンプトを使い、JSONの受け渡し形式だけを追加指定する。
+関係・Captionは使える項目を残し、不正項目を理由付きで除外する。
+Captionの名前を検出クラスへ固定せず、欠落は既存のnull補完を使用する。
+API/解析の失敗はその応答の失敗として保存する。接続先・クラウド・禁止通信などの制約違反は停止する。
+
+| ログ・状態 | 意味 |
+|---|---|
+| `failed_<task>_*.json` | 推論/API/解析失敗。正常キャッシュへは保存しない |
+| `rejected_relations.jsonl` / `rejected_captions.jsonl` | 除外項目と理由 |
+| `missing_captions.jsonl` | 欠落した検出ID |
+| `response_events.jsonl` | キャッシュ使用を含む応答単位の状態・件数 |
+| 成功/部分応答キャッシュ | 元応答、採用結果、除外/欠落、プロンプト、画像SHA256とメッセージ構成 |
+| `completion.json`の`vlm` | 失敗・除外・欠落・空の統合結果などの集計 |
+| `completed_with_vlm_issues` | 保存まで完了したがVLMの問題あり。全件正常の`completed`と区別 |
+
+厳密な旧挙動の診断には`vlm.response_policy=strict`を明示する。
+さらに`vlm.invalid_relation_policy=error`なら、除外済みキャッシュの元応答も検証する。
+`log_and_drop`なら対象外IDを除外する。strictの残りの検証条件は維持される。
+通常モードと診断モードのプロンプト・キャッシュを混同しない。
+
+35B・既存rawキャッシュ・stride 10の設定は`rerun_local_scene_graph_reference`。
+通常設定も元の関係表示閾値2を使い、1回観測の関係を表示する場合だけ`rerun_edge_min_detections=1`を指定する。
+修正範囲と維持した差は[BEHAVIOR_AUDIT.md](BEHAVIOR_AUDIT.md)を参照。
+
+## 200枚の元RGB付き表示とCaption救済
+
+200枚実験の出力:
+`outputs/local-only/assets/data/Replica/room0/exps/room0_reference_graph_attempt1/`
+
+元RRDを、既存の`outputs/local-only/original_rgb_view/rgb_mapping.rbl`で開く。
+左上が入力RGB、左下が関係付き注釈、右が同時刻の3D地図。
+frame timeline 0〜199は間引き後の番号。GUI確認の記録は`outputs/local-only/reference_room0/view/`。
+元RRDはCaption本文を記録していないため、現在のGUIに説明文パネルはない。
+
+Captionに代わり`description`キーで返った説明文は、再推論なしで次のスクリプトからexportできる。
+実行済みのコマンド:
+
+```bash
+PYTHONPATH= PYTHONNOUSERSITE=1 \
+  conda run --no-capture-output -n conceptgraph-local \
+  python scripts/local_only/recover_saved_captions.py \
+  --cache-dir outputs/local-only/full_room0/vlm_cache \
+  --experiment room0_reference_graph_attempt1 \
+  --map outputs/local-only/assets/data/Replica/room0/exps/room0_reference_graph_attempt1/pcd_room0_reference_graph_attempt1.pkl.gz \
+  --output outputs/local-only/reference_room0/caption_recovery
+```
+
+`--output`は既存ディレクトリへの上書きを拒否する。元地図・キャッシュ・RRDは変更しない。
+出力は`captions.md`（物体別一覧）、`objects.json`（観測と出典）、`frames.json`、`summary.json`。
+統合Captionの再生成やGUIへの反映は行わない。救済件数は[RESULTS.md](RESULTS.md)を参照。
+
+論文方式の別ルートは[PAPER_SCENEGRAPH_PLAN.md](PAPER_SCENEGRAPH_PLAN.md)を参照。
+現段階は計画のみで、実装・推論は未着手。

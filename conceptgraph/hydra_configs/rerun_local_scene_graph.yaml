@@ -3,9 +3,19 @@ defaults:
   - _self_
 
 make_edges: true
-exp_suffix: local_m3_${now:%Y%m%d_%H%M%S}
+exp_suffix: local_scene_graph_${now:%Y%m%d_%H%M%S}
+# Match the official Replica example; the explicit full profile overrides these.
+start: 0
+end: -1
+stride: 10
+save_objects_all_frames: false
 # M1's model-independent raw detections, masks and CLIP features are reused.
 # VLM fields are recomputed from the current adapter, never trusted across models.
 force_detection: false
-# Show every saved observation; detection counts remain visible as edge labels.
-rerun_edge_min_detections: 1
+# Original viewer shows edges observed at least twice.
+rerun_edge_min_detections: 2
+
+vlm:
+  response_policy: upstream
+  validation_retries: 0
+  invalid_relation_policy: log_and_drop

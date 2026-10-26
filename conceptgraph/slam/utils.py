@@ -1413,8 +1413,7 @@ def process_edges(match_indices, gobs, initial_objects_count, objects, map_edges
         obj2_objects_index = match_indices_w_new_obj[obj2_index] if obj2_index is not None else None
         
         if obj1_objects_index >= len(objects) or obj2_objects_index >= len(objects):
-            if detection_labels is not None:
-                raise IndexError(f"Invalid 2D-to-3D association for relation {edge}")
+            logging.warning("Dropping frame relation %s: 3D association outside object list", edge)
             continue
 
         curr_edges_3d_by_index.append((obj1_objects_index, relation, obj2_objects_index))

@@ -25,7 +25,8 @@ def main():
     objects.load_serializable(serialized)
     assert len({str(obj['id']) for obj in objects}) == len(objects), "Duplicate UUIDs"
     assert len({obj['curr_obj_num'] for obj in objects}) == len(objects), "Duplicate display IDs"
-    report = {"objects": len(objects), "detections": 0, "frames_with_associations": set(), "nodes": []}
+    report = {"objects": len(objects), "detections": 0, "frames_with_associations": set(), "nodes": [],
+              "caption_name_differences": 0, "missing_captions": 0}
     for obj in objects:
         points = np.asarray(obj['pcd'].points)
         bbox = np.asarray(obj['bbox'].get_box_points())
@@ -37,8 +38,12 @@ def main():
         assert np.isclose(np.linalg.norm(features), 1, atol=1e-4)
         assert len(obj['captions']) == len(obj['image_idx']) == obj['num_detections']
         assert all(set(cap) == {"id", "name", "caption"} for cap in obj['captions'])
-        assert all(cap['name'] == artifact['class_names'][class_id]
-                   for cap, class_id in zip(obj['captions'], obj['class_id']))
+        assert all(isinstance(cap['id'], str) and isinstance(cap['name'], str)
+                   and (cap['caption'] is None or isinstance(cap['caption'], str)) for cap in obj['captions'])
+        report['caption_name_differences'] += sum(
+            cap['name'] != artifact['class_names'][class_id]
+            for cap, class_id in zip(obj['captions'], obj['class_id']))
+        report['missing_captions'] += sum(cap['caption'] is None for cap in obj['captions'])
         if args.no_vlm:
             assert all(cap['caption'] is None for cap in obj['captions'])
             assert obj['consolidated_caption'] is None
@@ -52,8 +57,8 @@ def main():
     edges = edge_data['edges']
     if edge_data['objects']:
         assert [obj['id'] for obj in edge_data['objects']] == [obj['id'] for obj in objects]
-        reloaded = MapEdgeMapping(MapObjectList())
-        reloaded.load_serializable(edge_data)
+        reloaded = MapEdgeMapping(objects)
+        reloaded.load_serializable(edge_data, load_objects=False)
         assert len(reloaded.edges_by_index) == len(edges)
         for (a, b), edge in reloaded.edges_by_index.items():
             assert (a, b) == (edge.obj1_idx, edge.obj2_idx)

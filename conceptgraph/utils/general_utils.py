@@ -5,6 +5,7 @@ import logging
 import os
 from pathlib import Path
 import pickle
+import tempfile
 # from conceptgraph.utils.vis import annotate_for_vlm, filter_detections, plot_edges_from_vlm
 from conceptgraph.slam.slam_classes import MapObjectList
 from conceptgraph.slam.utils import prepare_objects_save_vis
@@ -553,16 +554,23 @@ def should_exit_early(file_path):
         return False
 
 def save_detection_results(base_path, results):
+    base_path = Path(base_path)
     base_path.mkdir(exist_ok=True, parents=True)
+    incomplete = base_path / '.incomplete'
+    incomplete.write_text('Writing raw detection fields; do not reuse yet.\n')
     for key, value in results.items():
         save_path = Path(base_path) / f"{key}"
-        if isinstance(value, np.ndarray):
-            # Save NumPy arrays using .npz for efficient storage
-            np.savez_compressed(f"{save_path}.npz", value)
-        else:
-            # For other types, fall back to pickle
-            with gzip.open(f"{save_path}.pkl.gz", "wb") as f:
-                pickle.dump(value, f)
+        with tempfile.NamedTemporaryFile(dir=base_path, suffix='.part', delete=False) as stream:
+            temporary = Path(stream.name)
+            if isinstance(value, np.ndarray):
+                np.savez_compressed(stream, value)
+                destination = Path(f'{save_path}.npz')
+            else:
+                with gzip.GzipFile(fileobj=stream, mode='wb') as compressed:
+                    pickle.dump(value, compressed)
+                destination = Path(f'{save_path}.pkl.gz')
+        os.replace(temporary, destination)  # Keeps hardlinked source caches unchanged.
+    incomplete.unlink()
                 
 def load_saved_detections(base_path):
     base_path = Path(base_path)
@@ -766,13 +774,16 @@ def save_pointcloud(exp_suffix, exp_out_path, cfg, objects, obj_classes, latest_
     - create_symlink (bool): Whether to create/update a symlink to the latest save. Default is True.
     """
     print("saving map...")
+    # Mapping is paused during this synchronous write. Avoid duplicating the full
+    # per-detection mask history in RAM; pickle preserves these shared references.
+    serialized_objects = objects.to_serializable(copy_data=False)
     # Prepare the results dictionary
     results = {
-        'objects': objects.to_serializable(),
+        'objects': serialized_objects,
         'cfg': cfg_to_dict(cfg),
         'class_names': obj_classes.get_classes_arr(),
         'class_colors': obj_classes.get_class_color_dict_by_index(),
-        'edges': edges.to_serializable() if edges is not None else None,
+        'edges': edges.to_serializable(serialized_objects=serialized_objects) if edges is not None else None,
     }
 
     # Define the save path for the point cloud
@@ -781,8 +792,11 @@ def save_pointcloud(exp_suffix, exp_out_path, cfg, objects, obj_classes, latest_
     pcd_save_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Save the point cloud data
-    with gzip.open(pcd_save_path, "wb") as f:
-        pickle.dump(results, f)
+    with tempfile.NamedTemporaryFile(dir=pcd_save_path.parent, suffix='.part', delete=False) as stream:
+        temporary = Path(stream.name)
+        with gzip.GzipFile(fileobj=stream, mode='wb') as compressed:
+            pickle.dump(results, compressed)
+    os.replace(temporary, pcd_save_path)
     print(f"Saved point cloud to {pcd_save_path}")
     if edges is not None:
         print(f"Also saved edges to {pcd_save_path}")

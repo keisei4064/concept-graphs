@@ -127,10 +127,10 @@ class MapObjectList(DetectionList):
         # return similarities.squeeze()
         return similarities
     
-    def to_serializable(self):
+    def to_serializable(self, copy_data=True):
         s_obj_list = []
         for obj in self:
-            s_obj_dict = copy.deepcopy(obj)
+            s_obj_dict = copy.deepcopy(obj) if copy_data else obj.copy()
             
             s_obj_dict['clip_ft'] = to_numpy(s_obj_dict['clip_ft'])
             # s_obj_dict['text_ft'] = to_numpy(s_obj_dict['text_ft'])
@@ -400,7 +400,7 @@ class MapEdgeMapping:
     def __repr__(self):
         return self.__str__()
     
-    def to_serializable(self):
+    def to_serializable(self, serialized_objects=None):
         s_edges = []
         for (obj1_index, obj2_index), edge in self.edges_by_index.items():
             s_edges.append({
@@ -411,18 +411,22 @@ class MapEdgeMapping:
             })
         
         # Serialize the object list using its existing method
-        s_objects = self.objects.to_serializable()
+        s_objects = self.objects.to_serializable() if serialized_objects is None else serialized_objects
         
         return {
             'edges': s_edges,
             'objects': s_objects
         }
         
-    def load_serializable(self, s_data):
-        assert len(self.edges_by_index) == 0 and len(self.objects) == 0, 'MapEdgeMapping should be empty when loading'
+    def load_serializable(self, s_data, load_objects=True):
+        assert len(self.edges_by_index) == 0
         
         # Deserialize the objects list first
-        self.objects.load_serializable(s_data['objects'])
+        if load_objects:
+            assert len(self.objects) == 0, 'MapEdgeMapping should be empty when loading'
+            self.objects.load_serializable(s_data['objects'])
+        else:
+            assert [obj['id'] for obj in self.objects] == [obj['id'] for obj in s_data['objects']]
         
         # Rebuild the edges
         for s_edge in s_data['edges']:

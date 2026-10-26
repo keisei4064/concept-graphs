@@ -1,0 +1,24 @@
+defaults:
+  - rerun_local_scene_graph
+  - _self_
+
+start: 0
+end: 2000
+stride: 1
+exp_suffix: room0_full_35b_${now:%Y%m%d_%H%M%S}
+detections_exp_suffix: local_room0_full_v1
+require_cached_detections: true
+# Rerun retains per-frame RGB/annotations/3D; avoid duplicate per-frame map pickles.
+save_objects_all_frames: false
+periodically_save_pcd: true
+periodically_save_pcd_interval: 250
+
+vlm:
+  model: qwen3.5:35b
+  base_url: http://127.0.0.1:11435/v1
+  temperature: 0.0
+  timeout: 300
+  max_tokens: 8192
+  validation_retries: 0
+  reuse_cache: true
+  log_dir: ${repo_root}/outputs/local-only/full_room0/vlm_cache

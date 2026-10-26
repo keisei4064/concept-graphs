@@ -38,6 +38,17 @@ def test_filter_reindexes_internal_fields_and_uuids_then_clears_all():
     assert edges.objects == [] and edges.edges_by_index == edges.edges_by_uuid == {}
 
 
+def test_missing_3d_association_is_logged_and_skipped(caplog):
+    mapped = objects(1)
+    edges = MapEdgeMapping(mapped)
+    gobs = {'detection_class_labels': ['cup 5', 'table 13'],
+            'edges': [('5', 'on top of', '13')]}
+    with caplog.at_level('WARNING'):
+        process_edges([0, None], gobs, 1, mapped, edges, 1, detection_labels=['5', '13'])
+    assert not edges.edges_by_index
+    assert '3D association outside object list' in caplog.text
+
+
 def test_merge_reindexes_uuids_against_the_new_object_list(monkeypatch):
     mapped = objects(3)
     edges = MapEdgeMapping(mapped)

@@ -11,6 +11,7 @@ import pickle
 import gzip
 import json
 import logging
+import time
 
 # Third-party imports
 import cv2
@@ -97,6 +98,7 @@ from conceptgraph.slam.mapping import (
     merge_obj_matches
 )
 from conceptgraph.utils.model_utils import compute_clip_features_batched
+from conceptgraph.utils.detection_cache import find_detection_cache
 from conceptgraph.utils.general_utils import get_vis_out_path, cfg_to_dict, check_run_detections
 
 
@@ -148,6 +150,10 @@ def main(cfg : DictConfig):
         device="cpu",
         dtype=torch.float,
     )
+    if cfg.get('local_only', False) and cfg.end != -1:
+        expected_frames = len(range(cfg.start, cfg.end, cfg.stride))
+        if len(dataset) != expected_frames:
+            raise ValueError(f'Input range incomplete: expected {expected_frames} frames, found {len(dataset)}')
     # cam_K = dataset.get_cam_K()
 
     objects = MapObjectList()
@@ -183,6 +189,14 @@ def main(cfg : DictConfig):
     run_detections = check_run_detections(cfg.force_detection, det_exp_path)
     det_exp_pkl_path = get_det_out_path(det_exp_path)
     det_exp_vis_path = get_vis_out_path(det_exp_path)
+    cache_paths = None
+    if cfg.get('local_only', False):
+        cache_paths = [find_detection_cache(det_exp_pkl_path, Path(path).stem) for path in dataset.color_paths]
+        missing_frames = sum(path is None for path in cache_paths)
+        run_detections = cfg.force_detection or missing_frames > 0
+        logging.info('Raw cache coverage: %d/%d frames', len(dataset) - missing_frames, len(dataset))
+        if cfg.get('require_cached_detections', False) and run_detections:
+            raise FileNotFoundError(f'{missing_frames} raw detection caches missing/incomplete; prepare detections first')
     vlm_vis_path = (get_vis_out_path(exp_out_path) if cfg.get("local_only", False)
                     and cfg.make_edges else det_exp_vis_path)
     openai_client = get_vlm_client(cfg, exp_out_path / "vlm") if cfg.make_edges else None
@@ -218,7 +232,9 @@ def main(cfg : DictConfig):
     exit_early_flag = False
     counter = 0
     frame_summaries = []
+    run_started = time.monotonic()
     for frame_idx in trange(len(dataset)):
+        frame_started = time.monotonic()
         tracker.curr_frame_idx = frame_idx
         counter+=1
         orr.set_time_sequence("frame", frame_idx)
@@ -254,7 +270,9 @@ def main(cfg : DictConfig):
         vis_save_path_for_vlm = get_vlm_annotated_image_path(vlm_vis_path, color_path)
         vis_save_path_for_vlm_edges = get_vlm_annotated_image_path(vlm_vis_path, color_path, w_edges=True)
         
-        if run_detections:
+        frame_run_detections = (cfg.force_detection or cache_paths[frame_idx] is None
+                                if cache_paths is not None else run_detections)
+        if frame_run_detections:
             results = None
             # opencv can't read Path objects...
             image = cv2.imread(str(color_path)) # This will in BGR color space
@@ -333,7 +351,9 @@ def main(cfg : DictConfig):
                 save_detection_results(det_exp_pkl_path / vis_save_path.stem, results)
         else:
             # Support current and old saving formats
-            if os.path.exists(det_exp_pkl_path / color_path.stem):
+            if cache_paths is not None:
+                raw_gobs = load_saved_detections(cache_paths[frame_idx])
+            elif os.path.exists(det_exp_pkl_path / color_path.stem):
                 raw_gobs = load_saved_detections(det_exp_pkl_path / color_path.stem)
             elif color_path.stem.isdecimal() and os.path.exists(det_exp_pkl_path / f"{int(color_path.stem):06}"):
                 raw_gobs = load_saved_detections(det_exp_pkl_path / f"{int(color_path.stem):06}")
@@ -341,7 +361,7 @@ def main(cfg : DictConfig):
                 # if no detections, throw an error
                 raise FileNotFoundError(f"No detections found for frame {frame_idx}: {det_exp_pkl_path / color_path.stem}")
 
-        if cfg.get("local_only", False) and cfg.make_edges and not run_detections:
+        if cfg.get("local_only", False) and cfg.make_edges and not frame_run_detections:
             raw_gobs.setdefault('detection_class_labels', [
                 f"{raw_gobs['classes'][class_id]} {index}"
                 for index, class_id in enumerate(raw_gobs['class_id'])])
@@ -353,6 +373,9 @@ def main(cfg : DictConfig):
                 vlm_vis_path, color_path, True, openai_client)
             raw_gobs.update(labels=labels, edges=edges, captions=captions)
 
+        raw_gobs.setdefault('detection_class_labels', [
+            f"{raw_gobs['classes'][class_id]} {index}"
+            for index, class_id in enumerate(raw_gobs['class_id'])])
         if not cfg.make_edges:
             # Old caches may lack these fields or contain a previous VLM run.
             raw_gobs['edges'] = []
@@ -389,7 +412,14 @@ def main(cfg : DictConfig):
         if cfg.get("local_only", False):
             frame_summaries.append({"frame": frame_idx, "source": color_path.name,
                                     "raw_detections": raw_detection_count,
-                                    "filtered_detections": len(gobs['xyxy'])})
+                                    "filtered_detections": len(gobs['xyxy']),
+                                    "raw_cache_reused": not frame_run_detections})
+            (exp_out_path / 'progress.json').write_text(json.dumps({
+                'phase': 'mapping', 'frames_total': len(dataset), 'frames_read': len(frame_summaries),
+                'source_frame': color_path.name, 'objects_before_fusion': len(objects),
+                'elapsed_seconds': time.monotonic() - run_started,
+                'frame_perception_seconds': time.monotonic() - frame_started,
+            }, indent=2))
 
         if len(gobs['mask']) == 0: # no detections in this frame
             continue
@@ -436,11 +466,6 @@ def main(cfg : DictConfig):
         # then continue, no need to match or merge
         if len(objects) == 0:
             objects.extend(detection_list)
-            if cfg.make_edges:
-                map_edges = process_edges(list(range(len(detection_list))), gobs, 0,
-                    objects, map_edges, frame_idx, detection_labels=detection_labels)
-            orr_log_objs_pcd_and_bbox(objects, obj_classes)
-            orr_log_edges(objects, map_edges, obj_classes, cfg.get("rerun_edge_min_detections", 2))
             if cfg.get("local_only", False):
                 with (exp_out_path / "associations.jsonl").open("a") as log:
                     log.write(json.dumps({"frame": frame_idx, "source": color_path.name,
@@ -632,8 +657,15 @@ def main(cfg : DictConfig):
                 objects=objects,
                 obj_classes=obj_classes,
                 latest_pcd_filepath=cfg.latest_pcd_filepath,
-                create_symlink=True
+                create_symlink=True,
+                edges=map_edges
             )
+            if cfg.get('local_only', False):
+                (exp_out_path / 'checkpoint.json').write_text(json.dumps({
+                    'frame': frame_idx, 'source_frame': color_path.name, 'nodes': len(objects),
+                    'edges': len(map_edges.edges_by_index), 'complete': False,
+                    'resume_policy': 'reuse raw/VLM caches and recompute fusion from the start',
+                }, indent=2))
 
         owandb.log({
             "frame_idx": frame_idx,
@@ -718,9 +750,23 @@ def main(cfg : DictConfig):
         if cfg.save_video:
             save_video_detections(det_exp_path)
 
+    vlm_summary = (openai_client.quality_summary()
+                   if cfg.get('local_only', False) and openai_client is not None else {})
+    if cfg.get('local_only', False) and cfg.make_edges and not map_edges.edges_by_index:
+        vlm_summary.update(no_scene_relations=True, has_issues=True)
     owandb.finish()
     if cfg.get("local_only", False) and openai_client is not None:
         openai_client.close()
+    if cfg.get('local_only', False):
+        (exp_out_path / 'completion.json').write_text(json.dumps({
+            'status': 'completed_with_vlm_issues' if vlm_summary.get('has_issues') else 'completed',
+            'frames': len(frame_summaries), 'frames_requested': len(dataset),
+            'nodes': len(objects), 'edges': len(map_edges.edges_by_index),
+            'elapsed_seconds': time.monotonic() - run_started,
+            'raw_cache_frames': sum(frame['raw_cache_reused'] for frame in frame_summaries),
+            'raw_detection_frames': sum(not frame['raw_cache_reused'] for frame in frame_summaries),
+            'vlm': vlm_summary,
+        }, indent=2))
 
 if __name__ == "__main__":
     main()

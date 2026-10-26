@@ -122,7 +122,9 @@ def get_vlm_client(cfg, log_dir):
         return LocalOllamaClient(base_url=settings.base_url, model=settings.model,
             log_dir=settings.get('log_dir') or log_dir, temperature=settings.temperature,
             timeout=settings.timeout, max_tokens=settings.max_tokens,
-            reuse_cache=settings.reuse_cache)
+            reuse_cache=settings.reuse_cache, validation_retries=settings.get('validation_retries', 2),
+            invalid_relation_policy=settings.get('invalid_relation_policy', 'error'),
+            response_policy=settings.get('response_policy', 'upstream'))
     return get_openai_client()
 
 # Function to encode the image as base64
