@@ -1,12 +1,11 @@
-# 完全ローカル環境・M0 記録
+# ローカル実行環境の準備
 
-検証日: 2026-10-25 (JST)。開始 commit: `5e83edd`。
-作業ブランチ: `codex/local-only-conceptgraphs`。開始時の変更なし。
+既存の`conceptgraph-local`が動く場合は再構築せず、[RUNBOOK.md](RUNBOOK.md)から再開する。
+以下は別PCや環境を作り直す場合の手順。ホストのDriver・CUDA・system Python・既存Conda環境を上書きしない。
 
-## 実測結果
+## 検証済み構成
 
-**M0: PASS**。`outputs/local-only/m0/smoke.json` と `smoke.log` に証拠を保存。
-`pip-check.txt`: `No broken requirements found.`
+2026-10-25の実測値。ホストnvcc13.0とPyTorch CUDA runtime11.8は別物で、CUDA拡張をホストnvccで再ビルドしない。
 
 |項目|実測|
 |---|---|
@@ -27,64 +26,58 @@
 |Ollama|0.30.10|
 |既存モデル|qwen3.5:9b `56671c2ab938`; qwen3.5:35b `72aac7c28be8`|
 
-GPU 256×256 行列積の有限性と同期を確認 (checksum `4194197.5`)。
-Open3D 点群生成に成功。PyTorch3D の実使用 API `box3d_overlap` をCPU/GPUの両方で
-実行し同一立方体のIoU=1を確認。さらに実装の `compute_3d_iou_accurate_batch`
-によるOpen3D頂点の並べ替え・拡張を通したGPU演算も合格。
-対象 mapping モジュールと必須依存をすべて import 済み。
+## 専用環境
 
-## M1前の技術選択
-
-原実装のPyTorch3Dを維持する。公式配布の既存バイナリが取得でき、GPUで実測合格したため、
-互換バージョン探索の段階で解決。Toolkit追加・ビルド・幾何アルゴリズム置換は不要。
-`CUDA_HOME` は実測で未設定。ホストnvcc 13.0でcu118拡張をビルドしない。
-CUDA runtime 11.8はPyTorch wheelが供給し、ホストDriver上で動作する。
-
-参照: [PyTorch3D公式インストール手順](https://github.com/facebookresearch/pytorch3d/blob/main/INSTALL.md)、
-[公式wheel](https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu118_pyt201/pytorch3d-0.7.4-cp310-cp310-linux_x86_64.whl)。
-
-## 再現手順 (リポジトリルート)
-
-既存同名環境を削除・上書きしないこと。`conda env list` に同名があれば、
-`conceptgraph-local-YYYYMMDD` 等の新規名へ置き換える。
+`conda env list`で同名が存在しないことを確認する。別名にする場合はenvironment.ymlのnameをコピー先で変更し、
+RUNBOOKのactivateと`CONCEPTGRAPH_CONDA_ENV`を合わせる。システムコマンドとして`ollama`・`strace`・`bwrap`が必要。
+GUIはデスクトップ接続、既存の2Dグラフ用`draw_relation_graph.py`はGraphvizの`dot`も使う。
 
 ```bash
 conda env list
 conda env create -f docs/local-only/environment.yml
 conda activate conceptgraph-local
-# 継承されるROSパッケージとユーザーsiteをこのシェル内で隔離する。
 export PYTHONPATH=
 export PYTHONNOUSERSITE=1
-python -c 'import os,sys; from pathlib import Path; assert Path(os.environ["CONDA_PREFIX"]).name.startswith("conceptgraph-local"); assert sys.prefix == os.environ["CONDA_PREFIX"]'
 python -m pip install numpy==1.26.4 torch==2.0.1 torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cu118
 python -m pip install -r docs/local-only/requirements-lock.txt --extra-index-url https://download.pytorch.org/whl/cu118
 python -m pip install -e .
 python -m pip check
 python scripts/local_only/m0_smoke.py
+python -m pytest -q tests/local_only
 ```
 
-直接依存の意図は `requirements.txt`、推移依存とCLIPのcommitを含む実測固定値は
-`requirements-lock.txt`。再現用Conda設定に個人の絶対パスを含めない。
-元README全体の環境やセンサー・シミュレータ用依存は導入しない。
+m0_smokeの出力先は`outputs/local-only/m0/`。import・GPU算術・点群生成・CPU/GPU IoUを検査する。
+既存のROS用PYTHONPATHやユーザーsiteの混入を避けるため、上の2つのexportを省略しない。
+依存の固定値は`requirements-lock.txt`、直接依存の意図は`requirements.txt`。
 
-## 問題・警告・保護
+## データとモデル
 
-- 初回pipがシェルのROS `PYTHONPATH`上の依存を「導入済み」と誤認した。
-  import失敗を環境層と特定し、`PYTHONPATH=` / `PYTHONNOUSERSITE=1`付きで
-  同一専用環境への依存導入を再実行した。解消後に上記スモークとpip checkを再実施。
-  初回失敗も `pip-dependencies.log`、修正は `pip-isolated.log` に保持。
-- 診断はセットアップ段階で実施した。モデル重み・Replicaの初期ダウンロードと、
-  通常実行のネットワーク監査はM1以降で区別する。
-- 既存Ollamaサービスの `/api/status` は `cloud.disabled=false`。
-  このサービスのままではM2の本番推論を始めない。恒久設定を変更せず、
-  クラウド無効を実測できる一時プロセス等で解決する必要がある。
-- Driver / system CUDA / system Python / 既存Conda環境 / bashrc / Ollamaサービスは変更しない。
-  `outputs/local-only/m0/protected-before.json` に保護ファイルのSHA256を保存。
-- インストールコマンドのログ: `conda-create.log`, `pip-torch.log`,
-  `pip-dependencies.log`, `pip-isolated.log`, `pip-editable.log`。
-- 全Condaパッケージ・pip freeze・開始時GPU/モデル一覧も同じGit追跡外ディレクトリに保存。
+Gitに含まれない入力を、実行経路に合わせて用意する。
 
-M1/M2/M3の結果は [RUNBOOK.md](RUNBOOK.md) と [RESULTS.md](RESULTS.md) に記録した。
-M2/M3で追加のパッケージ導入・Toolkit変更は行っていない。
-JSON検証の直接依存`jsonschema==4.26.0`はM0時点でOpen3D経由で導入済みで、lockにも含まれる。
-最終の保護ファイルSHA256検査は全件不変。既存Ollamaサービスを変更せず、一時サーバーのみ終了した。
+| 入力 | 標準配置・準備方法 |
+|---|---|
+| Replica room0 RGB-Dとpose | `outputs/local-only/assets/data/Replica/room0/`。初期取得は下のprepare_assets |
+| YOLO-World／SAM／CLIP | `outputs/local-only/assets/weights/`と`clip_checkpoint.txt`。prepare_assetsが不足分を取得 |
+| YOLO用CLIP ViT-B/32 | prepare_assetsがユーザーcacheへ準備。重みフォルダだけのコピーでは不足する場合がある |
+| Qwen | 既存Ollamaモデル配置の`manifests/`と`blobs/`。9B/35Bの必要なタグがあることを確認 |
+| 後処理用の完成マップ | RUNBOOKの`CG_MAP`。73物体マップと観測元RGBはローカル成果物で、cloneだけでは得られない |
+| 公開main参照ソース | RUNBOOKの`CG_REFERENCE`。保存済みsnapshotを使う。なければ[公開mainのソース](https://github.com/concept-graphs/concept-graphs/blob/main/conceptgraph/scenegraph/build_scenegraph_cfslam.py)を初期準備で保存し、`CG_REFERENCE`をそのパスへ変更 |
+
+```bash
+# 初期セットアップだけネットワークを利用する。既存ファイルは再利用。
+python scripts/local_only/prepare_assets.py --frames 100
+# 全区間stride10の200枚には全2000組が必要。必要なときだけ取得範囲を拡大。
+# python scripts/local_only/prepare_assets.py --frames 2000 --data-only
+```
+
+prepare_assetsは`clip_checkpoint.txt`へ実ファイルの絶対パスを記録する。別PCへコピーした場合は実配置に合わせて直すか、
+`CONCEPTGRAPH_CLIP_CHECKPOINT`を指定する。元の取得先と入力hashは`outputs/local-only/assets/manifest.json`。
+Qwenが既にある場合は再取得しない。新PCで未導入なら初期準備段階でモデルを取得してから、通常実行へ進む。
+
+既存後処理の参照ソースhashは`7d748815a92ab606bcdde2dc0ee817836867042574797ffc41472215b0896841`（SHA256）。
+取得URL・他の参照ソースhashは`outputs/local-only/paper_scenegraph_room0/attempt1/source_refs/sources.json`に保存済み。
+最新mainは同じ内容とは限らない。既存snapshotを使えない試行は参照ソースの違いを区別する。
+
+保存マップ・後処理manifest・cacheには絶対パスが含まれる。**別PCでファイルをコピーするだけの再開には対応していない**。
+同じ配置を復元するか、移行先でmappingから作り直して新しい後処理rootをprepareする。
+通常実行は暗黙のダウンロードやクラウド推論を許可せず、接続はローカルのみ。起動手順はRUNBOOKを参照。

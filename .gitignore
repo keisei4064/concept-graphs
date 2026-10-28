@@ -9,6 +9,12 @@ manipulation/dataset
 
 outputs
 
+# Private working notes and machine-specific overrides.
+/docs/local-only/NOTES.md
+/docs/local-only/private/
+/.env.local
+/.env.*.local
+
 # Generated local class palettes (also embedded in saved maps).
 conceptgraph/*_classes_colors.json
 wandb

@@ -1,0 +1,6 @@
+# Keep slide exports and local evidence on disk, outside Git.
+/*
+!/.gitignore
+!/README.md
+!/build_assets.py
+!/build_p15.py

@@ -1,409 +1,179 @@
-# 完全ローカル実行手順・実験記録
+# ローカル実行：再開と新規試行
 
-リポジトリルートから実行する。専用環境の再現は [ENVIRONMENT.md](ENVIRONMENT.md)。
-指定ブランチ以外では作業しない。`outputs/` はGit追跡外で、データ・重み・生ログを置く。
-セットアップの配布元ダウンロードと、通常推論の外部通信禁止は別の段階として扱う。
+| やりたいこと | 読む箇所 | 必要なもの |
+|---|---|---|
+| 保存結果を見る | [1](#1-保存結果を見る推論不要) | 保存済みRRD、GUI |
+| 同じマップでCaption・MST・関係推定を試す | [2](#2-保存マップから後処理を試す) | 73物体マップ、元RGB、参照ソース、Qwen35B |
+| RGB-Dからmappingを作り直す | [3](#3-rgb-dからmappingを試す) | Replica、YOLO/SAM/CLIP重み。VLM有効時はQwen |
+| 別PC・環境消失から準備する | [ENVIRONMENT.md](ENVIRONMENT.md) | 環境・データの準備 |
 
-## M1: VLMなしのReplica
+方式は2系統ある。**後処理**は完成済みマップの観測画像→Caption→要約→MST→関係推定。
+**リアルタイム版**はフレーム画像から関係を求め、mappingの対応先へ結び付ける。
+過去の件数・意味的な誤り・論文との差は[RESULTS.md](RESULTS.md)。原論文全体の忠実再現とは呼ばない。
 
-初期セットアップ (ネットワーク利用可、既存ファイルは再利用):
+## 0. 共通準備
+
+各端末でリポジトリルートへ移動して実行する。以降はこのシェルの変数を使う。
 
 ```bash
 conda activate conceptgraph-local
 export PYTHONPATH=
 export PYTHONNOUSERSITE=1
-export YOLO_CONFIG_DIR="$PWD/outputs/local-only/yolo-config"
-python scripts/local_only/prepare_assets.py --frames 100
-python scripts/local_only/inspect_replica.py outputs/local-only/assets/data/Replica --end 3
-python -m pytest -q tests/local_only
+export OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+CG_SAVED=outputs/local-only/paper_scenegraph_room0/attempt1
+CG_DATA=outputs/local-only/assets/data/Replica
+CG_MAP="$CG_DATA/room0/exps/room0_reference_graph_attempt1/pcd_room0_reference_graph_attempt1.pkl.gz"
+CG_REFERENCE="$CG_SAVED/source_refs/official_main_scenegraph.py"
+command -v python conda bwrap strace rerun ollama
 ```
 
-ReplicaはNICE-SLAM公開のposed RGB-Dをそのまま使用する。HTTP Rangeで`room0`の
-先頭100組と`traj.txt`を取り出し、12.4GBの全シーンアーカイブのダウンロードを避ける。
-既存データを使用する場合はセットアップのデータ取得を省略し、下の環境変数で指定する。
-セットアップ中のディレクトリを入力検査・mappingが同時に読まないこと。
+保存先やデータが違う場合は上の変数を変更する。表示にはデスクトップ接続が必要。
+既存環境が使えるか不明なら`python -m pytest -q tests/local_only`を実行する。
+データやモデルが欠けている場合は[環境準備](ENVIRONMENT.md#データとモデル)へ進む。
+
+## 1. 保存結果を見る（推論不要）
 
 ```bash
-# 通常実行: クライアント側はループバック以外への接続/DNSを拒否。
-# 3フレームの合格を確認してから100フレームへ拡大する。
-bash scripts/local_only/run_mapping.sh outputs/local-only/m1/smoke \
-  exp_suffix=m1_smoke end=3 stride=1
+# 最終グラフ：RGB・切り出し・2Dグラフ・3D・説明
+bash scripts/local_only/view_paper_scenegraph.sh "$CG_SAVED" full_main
+# MST前→MST後→LLM入力→判定→最終グラフ
+bash scripts/local_only/view_paper_scenegraph.sh "$CG_SAVED" full_main candidate_stages.rrd
+```
+
+どちらか一つを選ぶ。`candidate_step`は0〜4が全体段階、5〜25が個別候補、26が案内。
+実入出力は`$CG_SAVED/full_main/evidence.md`、`relations.jsonl`、`object_summaries.jsonl`。
+RRDだけなら元画像・Qwenは不要。静的グラフの表示時刻は関係の成立時刻ではない。
+
+RRDがなくても推論結果と準備データがあれば、次で検証・再生成できる（レポートと表示ファイルを更新）。
+
+```bash
+python scripts/local_only/run_paper_scenegraph.py verify --root "$CG_SAVED" --run full_main
+python scripts/local_only/run_paper_scenegraph.py render --root "$CG_SAVED" --run full_main
+python scripts/local_only/run_paper_scenegraph.py render-candidates --root "$CG_SAVED" --run full_main
+```
+
+`verify`は`status: PASS`を確認する。`full_main`が最終版で、`full`はBBox修正前の中間結果。
+GUIとrenderは専用設定・bwrapで通信を隔離する。bwrapなしでは停止する。
+
+## 2. 保存マップから後処理を試す
+
+この経路はYOLO・SAM・CLIP・3D融合を再実行しない。元マップに保存されたRGBパスが現在も読める必要がある。
+マップ・元RGB・参照ソースを確認し、新しい試行先を作る。
+
+```bash
+test -f "$CG_MAP" && test -f "$CG_REFERENCE" && test -f "$CG_DATA/room0/results/frame000000.jpg"
+mkdir -p outputs/local-only/trials
+CG_TRIAL=$(mktemp -d outputs/local-only/trials/paper-XXXXXX)
+printf '今回の試行先: %s\n' "$CG_TRIAL"
+python scripts/local_only/run_paper_scenegraph.py prepare \
+  --root "$CG_TRIAL" --map "$CG_MAP" --reference "$CG_REFERENCE"
+```
+
+`prepared: true`と`$CG_TRIAL/contact_sheet.jpg`を確認する。
+prepareは全物体から最大10観測を準備し、下のpilotだけ推論対象を5物体・最大3観測へ絞る。
+現在の73物体マップでは全体384画像。別のマップでは`--indices`の物体indexを選び直す。
+
+### 一時Ollamaを起動（別端末）
+
+同じ共通準備を行い、**既存モデルがあるディレクトリ**を指定する。このPCで確認済みの配置は次のとおり。
+
+```bash
+export CONCEPTGRAPH_OLLAMA_MODELS=/usr/share/ollama/.ollama/models
+# 別配置なら上を書き換える。manifests/ と blobs/ が必要。
+test -d "$CONCEPTGRAPH_OLLAMA_MODELS/manifests"
+test -d "$CONCEPTGRAPH_OLLAMA_MODELS/blobs"
+mkdir -p outputs/local-only/trials
+CG_SERVER=$(mktemp -d outputs/local-only/trials/ollama-XXXXXX)
+bash scripts/local_only/serve_ollama.sh "$CG_SERVER"
+```
+
+起動した端末はそのままにする。既存11434サービスは使わず、空いている11435で起動する。
+終了はこの端末でCtrl-C。共有モデル・通常サービス・他のGPUプロセスを削除／停止しない。
+
+### 小さく試す→全体へ進む（元の端末）
+
+```bash
+curl --fail --noproxy '*' http://127.0.0.1:11435/api/status
+OLLAMA_HOST=127.0.0.1:11435 ollama list
+```
+
+`cloud.disabled=true`とローカルの`qwen3.5:35b`を確認してから実行する。
+
+```bash
+python scripts/local_only/run_paper_scenegraph.py infer --root "$CG_TRIAL" \
+  --run pilot --indices 2 7 12 13 19 --max-observations 3 --model qwen3.5:35b
+python scripts/local_only/run_paper_scenegraph.py verify --root "$CG_TRIAL" --run pilot
+python scripts/local_only/run_paper_scenegraph.py render --root "$CG_TRIAL" --run pilot
+bash scripts/local_only/view_paper_scenegraph.sh "$CG_TRIAL" pilot
+```
+
+`verify`のPASSと画像・Caption・関係方向を確認する。API／構文の成功は意味的な正解を保証しない。
+同じ元の端末で全対象へ進むなら次を実行する。pilotで取得済みの画像Captionはcacheで再利用する。
+
+```bash
+python scripts/local_only/run_paper_scenegraph.py infer --root "$CG_TRIAL" \
+  --run full --max-observations 10 --model qwen3.5:35b
+python scripts/local_only/run_paper_scenegraph.py verify --root "$CG_TRIAL" --run full
+python scripts/local_only/run_paper_scenegraph.py render --root "$CG_TRIAL" --run full
+python scripts/local_only/run_paper_scenegraph.py render-candidates --root "$CG_TRIAL" --run full
+bash scripts/local_only/view_paper_scenegraph.sh "$CG_TRIAL" full
+```
+
+進捗は`$CG_TRIAL/<run>/state.json`、完了集計は`report.json`、最終グラフは`scene_graph.json`。
+根拠は`evidence.md`、3タスクの実応答は`captions.jsonl`・`object_summaries.jsonl`・`relations.jsonl`、cacheは`$CG_TRIAL/vlm_cache/`。
+同じroot・run・設定でinferを再実行すると有効cacheを再利用する。設定やモデルを替えるときはrun名を変える。
+新規推論だけで比較したい場合は新しい`CG_TRIAL`を作る。CLI既定のroot/runは既存結果を指すため、省略しない。
+
+## 3. RGB-Dからmappingを試す
+
+モデル重みと`outputs/local-only/assets/clip_checkpoint.txt`が必要。以下の3枚検証はQwen不要。
+
+```bash
+mkdir -p outputs/local-only/trials
+CG_MAPPING=$(mktemp -d outputs/local-only/trials/map-XXXXXX)
+CG_EXP=$(basename "$CG_MAPPING")
+python scripts/local_only/inspect_replica.py "$CG_DATA" --end 3 --output "$CG_MAPPING/input.json"
+bash scripts/local_only/run_mapping.sh "$CG_MAPPING" \
+  exp_suffix="$CG_EXP" end=3 stride=1 save_objects_all_frames=false
 python scripts/local_only/validate_map.py \
-  outputs/local-only/assets/data/Replica/room0/exps/m1_smoke/pcd_m1_smoke.pkl.gz
-RERUN_ANALYTICS_ENABLED=false rerun print \
-  outputs/local-only/assets/data/Replica/room0/exps/m1_smoke/rerun_m1_smoke.rrd \
-  > outputs/local-only/m1/smoke/rerun-structure.txt
-
-# smokeが合格した後のみ
-bash scripts/local_only/run_mapping.sh outputs/local-only/m1/100frames \
-  exp_suffix=m1_100frames end=100 stride=1
+  "$CG_DATA/room0/exps/$CG_EXP/pcd_$CG_EXP.pkl.gz" --no-vlm
 ```
 
-独自の既存データ・モデル位置は `CONCEPTGRAPH_DATA_ROOT` (その下に`Replica/room0`)、
-`CONCEPTGRAPH_MODEL_ROOT`、`CONCEPTGRAPH_CLIP_CHECKPOINT` で上書きできる。
-Conda環境を新規別名にした場合は `CONCEPTGRAPH_CONDA_ENV` を指定する。
-既存の成功結果を保持するには `exp_suffix` とログディレクトリを新しい名前にする。
+`inspect_replica`と`validate_map`のPASS、`$CG_MAPPING/network-audit.json`を確認する。
+変更可能な項目は`end`（終端、含まない）・`stride`・`exp_suffix`。別試行では上のmktempからやり直す。
+独自のデータ配置は`CONCEPTGRAPH_DATA_ROOT`（Replicaの親）、重みは`CONCEPTGRAPH_MODEL_ROOT`、
+CLIPは`CONCEPTGRAPH_CLIP_CHECKPOINT`、Conda環境名は`CONCEPTGRAPH_CONDA_ENV`で指定する。
+上の`CG_DATA`は入力検査用なので、独自配置では`CONCEPTGRAPH_DATA_ROOT`も合わせる。
 
-主な成果物:
-
-- `.../room0/exps/<exp_suffix>/pcd_<exp_suffix>.pkl.gz`: 元実装形式の点群・特徴・物体ID・関係。
-- `.../rerun_<exp_suffix>.rrd`: viewerを起動せず保存するRerun記録。
-- `.../config_params*.json`: 解決済み設定、`run_metadata.json`: フレーム数と検出数。
-- `.../associations.jsonl`: 検出番号→物体UUIDと新規/融合の対応。
-- `.../local_detections_<start>_<end>_<stride>/detections/`: 検出・SAM mask・OpenCLIP特徴キャッシュ。
-- `outputs/local-only/m1/<run>/`: 実行ログ、PID、開始時刻、commit、override、GPU前後状態。
-
-`network.jsonl`はPythonの接続・名前解決の許可/拒否を記録する。
-`network.strace`はネイティブライブラリと子プロセスを含む実際のネットワークsyscallを記録し、
-`network-audit.json`が外部通信先を検査する。Ultralyticsのimport時の到達性確認などが
-拒否ログに現れても外部へのsyscallは許可しない。初期ダウンロードはこの通常実行に含めない。
-PythonガードはOSネットワーク名前空間の代替ではないため、ネイティブ通信の実測監査も必須。
-
-可視化は `rerun <file.rrd>` で開く。自動検証では保存と`rerun print`による構造検査を行い、
-GUIの目視確認と区別して記録する。Rerunは0.15.1で再生する。
-
-## 失敗の切り分け
-
-- 環境: ROSの`PYTHONPATH`混入を避け、M0 smoke / `pip check`を再確認。
-- 入力・幾何: RGB/depth組数、`traj.txt`、6553.5のdepth scale、内部行列、c2wを検査。
-- 検出: 重みの存在を確認。通常実行での暗黙ダウンロードは許可しない。
-- 対応付け: `associations.jsonl`と元実装の閾値を確認。アルゴリズム調整で誤魔化さない。
-- シリアライズ: `validate_map.py`で非空・有限値・UUID・caption数を検査。
-- VLM: M1合格までは実行しない。M2で接続と異常系を独立検証してからM3へ進む。
-
-## M2: Ollamaを独立検証
-
-既存サービスの `/api/status` が `cloud.disabled=false` だったため、その設定・プロセスを
-変更せず、同じ読み取り可能なモデルファイルを使う一時サーバーを起動した。
-モデルの再取得・量子化指定・`ollama pull` は行っていない。
+VLM付きの3枚試行は、別端末の一時Ollamaを起動してから**新しい**試行先・実験名で次を実行する。
 
 ```bash
-# 別端末: 既存のモデルディレクトリを指定する。空きポート11435を利用。
-CONCEPTGRAPH_OLLAMA_MODELS=/path/to/existing/models \
-  bash scripts/local_only/serve_ollama.sh outputs/local-only/m2/server
-# そのサーバーの /api/status が disabled=true, source=env であることを確認。
-curl --noproxy '*' http://127.0.0.1:11435/api/status
-```
-
-一時サーバーは`OLLAMA_NO_CLOUD=1`を**サーバープロセス**へ設定する。
-`OLLAMA_NOPRUNE=1`で共有済み重みのpruneを禁止し、同時ロード1モデル、コンテキスト8192、
-並列1に制限する。既存の11434サービスはそのまま残す。
-M2/M3終了後に一時サーバーの端末でCtrl-Cし、既存サービスや他のGPUプロセスを停止しない。
-
-```bash
-# M1検出キャッシュから番号付き画像を作成。検出・SAM・OpenCLIPの再実行は不要。
-python scripts/local_only/prepare_vlm_input.py \
-  outputs/local-only/assets/data/Replica/room0/exps/local_detections_0_3_1/detections/frame000000 \
-  outputs/local-only/assets/data/Replica/room0/results/frame000000.jpg \
-  outputs/local-only/m2/input-readable
-
-# 必ず9B→35B。同じinput-readableの画像とラベルを使う。
-mkdir -p outputs/local-only/m2/qwen9b-final outputs/local-only/m2/qwen35b-final
-strace -f -e trace=network -s 160 -o outputs/local-only/m2/qwen9b-final/network.strace \
-  python scripts/local_only/vlm_smoke.py --base-url http://127.0.0.1:11435/v1 \
-  --model qwen3.5:9b --input outputs/local-only/m2/input-readable \
-  --output outputs/local-only/m2/qwen9b-final
-strace -f -e trace=network -s 160 -o outputs/local-only/m2/qwen35b-final/network.strace \
-  python scripts/local_only/vlm_smoke.py --base-url http://127.0.0.1:11435/v1 \
-  --model qwen3.5:35b --input outputs/local-only/m2/input-readable \
-  --output outputs/local-only/m2/qwen35b-final
-python scripts/local_only/audit_network.py outputs/local-only/m2/server/network.strace
-```
-
-Adapterの既定URLは指定書どおり`http://127.0.0.1:11434/v1`。
-今回は既存サービスの設定により明示的に11435へ上書きする。
-外部URL、クラウド有効/未確認サービス、未インストール/remoteモデルは推論前に拒否。
-OpenAI SDKはダミーキー`ollama-local-only`と`trust_env=False`のHTTPクライアントだけに使用し、
-実キーを読まず、redirect追従・SDK再試行・外部へのfallbackを無効にしている。
-
-3タスクは関係、Caption、同一物体のCaption統合を維持。ローカル版のプロンプトは
-元GPT用のtuple/list出力指示をJSON objectへ変更し、対応schemaもプロンプト内へ明記する。
-`response_format=json_schema`を送るが、実際に不正な応答を観測したため生成時の強制だけを
-信用せず、応答JSON・ID・名前・自己ループ・関係語を必ず再検証する。
-35Bが有効JSONを単一のMarkdown fenceで包む応答を実測したため、その外側fenceだけを
-明示的に除去し`normalization=single_json_fence`を記録する。壊れたJSONの修復や部分抽出はしない。
-`reasoning_effort=none`で思考を無効化し、temperature=0、max_tokens=4096。
-
-各`responses/*.json`に実プロンプト・schema・生応答・JSON・画像SHA256・モデルdigest・遅延を保存。
-画像base64を標準出力/応答記録に出さない。失敗は`failed_*.json`と`errors.jsonl`に保存して例外送出。
-有効な出力だけcacheし、モデルdigest・プロンプト・画像・ラベル・設定が異なれば再利用しない。
-`vlm_smoke.py`自体は比較のためcacheを使わない。`summary.json`、`ps.json`、`ollama-ps.txt`、
-`nvidia-smi.txt`がGPU実測と結果の証拠となる。
-
-参考: [Ollama公式FAQ](https://docs.ollama.com/faq)、
-[使用バージョンのOpenAI互換変換実装](https://github.com/ollama/ollama/blob/v0.30.10/openai/openai.go)。
-
-## M3: ローカルScene Graph
-
-M1/M2合格後に同じ一時サーバーを使い、下記で完走を確認した。
-`rerun_local_scene_graph`はReplica構成を継承し、VLMを有効にする。
-現在の既定は全区間・stride 10、関係表示は元と同じ観測2回以上。
-下の小規模検証では`end=3 stride=1`を明示する。
-
-```bash
-# 通常はM1の3フレーム検出キャッシュをそのまま使う。
-bash scripts/local_only/run_mapping.sh outputs/local-only/m3/new-qwen35b \
-  --config-name=rerun_local_scene_graph exp_suffix=m3_new_qwen35b end=3 stride=1 \
+CG_GRAPH=$(mktemp -d outputs/local-only/trials/graph-XXXXXX)
+CG_EXP=$(basename "$CG_GRAPH")
+bash scripts/local_only/run_mapping.sh "$CG_GRAPH" \
+  --config-name=rerun_local_scene_graph exp_suffix="$CG_EXP" end=3 stride=1 \
   vlm.base_url=http://127.0.0.1:11435/v1 vlm.model=qwen3.5:35b
-
-# 9Bへ切り替えても検出・SAM・OpenCLIPを再実行しない。
-bash scripts/local_only/run_mapping.sh outputs/local-only/m3/new-qwen9b \
-  --config-name=rerun_local_scene_graph exp_suffix=m3_new_qwen9b end=3 stride=1 \
-  vlm.base_url=http://127.0.0.1:11435/v1 vlm.model=qwen3.5:9b
+python scripts/local_only/validate_map.py \
+  "$CG_DATA/room0/exps/$CG_EXP/pcd_$CG_EXP.pkl.gz" --require-edges
 ```
 
-実測合格した保存物 (`MAP`には次のどちらかを指定):
+地図・元RRD・`associations.jsonl`は`$CG_DATA/room0/exps/$CG_EXP/`。ログは`$CG_GRAPH/mapping.log`。
+関係0件では`--require-edges`が失敗する。保存不整合と、推論が関係を返さなかったケースをログで分ける。
+100枚へ拡大する場合は新しい実験で`end=100 stride=1`、全区間200枚なら`end=-1 stride=10`を明示する。
+後者には全2000組のRGB-Dが必要。旧2000枚ジョブや`run_full_room0.py`の通常モードは自動で再開しない。
 
-- `outputs/local-only/assets/data/Replica/room0/exps/m3_qwen35b_complete/pcd_m3_qwen35b_complete.pkl.gz`
-- `outputs/local-only/assets/data/Replica/room0/exps/m3_qwen9b/pcd_m3_qwen9b.pkl.gz`
+## 困ったとき
 
-```bash
-MAP=outputs/local-only/assets/data/Replica/room0/exps/m3_qwen35b_complete/pcd_m3_qwen35b_complete.pkl.gz
-python scripts/local_only/validate_map.py "$MAP" --require-edges
-python scripts/local_only/render_scene_graph.py "$MAP" outputs/local-only/scene_graph.png
-# 保存済みmapから全エッジを再記録できる。Ollama不要、VLM再実行なし。
-RERUN_ANALYTICS_ENABLED=false python scripts/local_only/replay_rerun.py \
-  "$MAP" outputs/local-only/scene_graph_full.rrd --min-edge-detections 1
-RERUN_ANALYTICS_ENABLED=false rerun print --verbose outputs/local-only/scene_graph_full.rrd
-# GUIで目視する場合
-rerun outputs/local-only/scene_graph_full.rrd
-```
-
-実走と同様にsyscallまで監査する場合、`replay_rerun.py`を
-`strace -f -e trace=network -s 160 -o <trace>`で起動し、`audit_network.py <trace>`で確認する。
-実測済みの全エッジ記録とPNGは`outputs/local-only/m3/qwen35b-complete/`と`m3/qwen9b/`の
-`scene_graph_full.rrd` / `scene_graph.png`。各`replay-structure.txt`が読込・構造検査の証拠。
-
-元Rerun helperは観測1回のエッジを隠すため、初回35Bの3エッジ中表示されたのは観測2回の1件、
-9Bの1エッジは非表示だった。再記録では閾値1を明示して全エッジを構造検証した。
-以後のScene Graph構成も`rerun_edge_min_detections: 1`を明示する。元のhelper既定値2は保持し、
-点群/関係の採否、保存された観測数、推定アルゴリズムは変更しない。
-
-キャッシュに関する実測と制約:
-
-- 3フレームの検出、SAM mask、OpenCLIP特徴を再利用。正常実走ログの
-  `NOT Running detections...`と、24 raw cacheファイルのSHA256不変を確認。
-- 9Bは`local_detections_without_vlm`を使用し、`labels/edges/captions/detection_class_labels`の
-  4フィールドを除いた実キャッシュで完走した。元キャッシュを削除・改変せずhardlinkで作成し、
-  `outputs/local-only/m3/legacy-cache-manifest.json`に対応とhashを保存。
-- VLMフィールドは実行モデルで再生成し、元キャッシュへ書き戻さない。注釈画像も実験ごとに保存。
-  モデルdigestと画像・ラベル・プロンプト・設定が一致した有効応答だけを再利用する。
-- 35B成功実走は先の失敗実験の有効な画像応答cacheを`vlm.log_dir`で再利用した。
-  失敗したCaption統合だけを修正・単体検証し、17物体の統合を完了した。
-- 3D対応付け・融合は安価なので再計算する。既存のframe保存形式は元2D番号や全merge履歴を
-  保持せず、そのまま別モデルの関係を最終物体へ付け直すには追加のreplay実装が必要。
-  今回は原設計を保ち、3D融合キャッシュの完全再生には書き換えない。
-- M3の両モデルは3フレームだけで比較した。100フレームのVLM実行は未実施。
-
-## 実行結果
-
-M0: 合格、commit `b5d041d`。詳細はENVIRONMENT.md。
-M1 少数実走: 3/3フレーム完走、17物体、61関連検出、特徴1024次元。
-`m1_smoke` のmap保存・再ロード、有限点群/特徴、UUID一意性、caption整合性、
-Rerunのframeタイムライン/点群/Bounding Box/uuidの構造検査に合格。
-キャプションはすべてnull、関係は空。APIキーは実行スクリプト内で未設定にする。
-`m1/smoke/network-audit.json`: PASS、インターネット/ループバック宛てconnect/send先ともゼロ。
-M1時点のGUI目視は未実施で、Rerun保存・構造検査を代替とした。後述の追加GUI検証も参照。
-全100フレームのRGB-D/c2w/内部行列/深度スケール/投影往復検査も合格。
-**M1: 合格**。100/100フレームのmappingも完走し、25物体・1980関連検出を保存・再ロード。
-全100フレームが保存物の関連検出に含まれる。特徴・点群・ID・null captions・空edgesの検査に合格。
-`m1_100frames` のRerun記録は597,807,630 bytesで、`rerun print`が正常読込。
-`m1/100frames/network-audit.json`もPASS、通信先なし。mappingループは約213秒。
-最終denoise/filter/mergeと明示的Rerun closeを含めて実行した。
-単体テストは7件合格 (`outputs/local-only/m1/unit.log`)。
-実験入力と4つの重みファイルのSHA256は `outputs/local-only/assets/manifest.json` に保存。
-**M2: 合格** (`256b848`)。9B→35Bの順で同一画像を使用し、両方で20件のCaption、有効な関係と統合Caption、
-100% GPUロードを確認。結果・遅延・digestとモデル別失敗履歴は [RESULTS.md](RESULTS.md)。
-クライアントと一時サーバーのsyscall監査は127.0.0.1のみ。
-M2時点の単体テスト26件合格。
-**M3: 合格**。35Bは17物体/61関連検出/3エッジ、9Bは17物体/61関連検出/1エッジ。
-両モデルとも17件の統合Captionを保存し、16物体が複数の有効観測Captionを持つ。
-再ロード時の有限値/ID一意性/Caption名・順序/エッジ端点・方向・UUID辞書を検査。
-Rerun再記録とPNGを生成して構造・図を確認した。M3コミット時点はGUI未実施だったが、追加検証で表示を確認した。
-最終単体テストは32件合格。通信先は全推論クライアント/一時サーバーで127.0.0.1のみ、
-図・Rerun再記録の通信先はゼロ。一時サーバーだけを終了し、既存Ollamaは元のPID 2105で稼働。
-`m3/safety-after.json`で保護ファイル全件のSHA256不変、一時ポート閉鎖を確認した。
-Driver/Toolkit/system Python/既存Conda環境/bashrc/Ollamaサービスの変更なし。
-
-観測した問題と対応 (失敗を合格として扱わない):
-
-- 環境層: M0初回のROS依存混入を隔離し、import/GPU smokeを再実施して合格。
-- 入力層: 初回の取得中データ検査はRGB/depth数不一致で失敗。
-  取得完了後の3フレーム/100フレーム検査に合格。データそのものは変更していない。
-- 設定層: モジュール入口ではHydraのconfig packageに`__init__.py`が必要だった。
-  追加後、解決済みReplica構成を検証。
-- 実装層: `MapObjectList(device=...)` はlistの未対応引数だったため対象scriptだけ修正。
-  VLM無効時のmerge戻り値のunpackも型契約どおりに修正。幾何/Association/Fusionの計算は維持。
-- シリアライズ層: Rerun 0.15.1にグローバル`flush()`は存在しない。
-  初回3フレームの記録はプロセス終了時に保存され構造検査に合格したが、
-  明示的なファイルcloseは`disconnect()`へ修正し、100フレーム実走で検証する。
-- supervision 0.20のColorPalette/BoxAnnotator非推奨警告は記録。
-  現バージョンでは機能し、無関係なAPI更新は行わない。
-- M3対応付け層: 幾何処理で除外された検出をraw番号のまま配列indexとして参照するずれ、
-  新規物体の追加後の個数を追加前として渡す誤り、filter後のedge内部index、merge後のUUID参照を修正。
-  元の幾何/類似度/対応付け/融合計算を変更せず、識別子と戻り値契約を整合させた。
-- M3 VLM層: `m3/qwen35b` / `m3/qwen35b-final` はCaption統合がschemaを返して停止。
-  有効な視覚応答を保存・再利用し、失敗した2入力の統合だけを独立に再現した。
-  本文のschema記載を統合タスクだけ省いた後、単体2件と全17物体の統合が合格。
-- M3ログ層: 旧HydraのDEBUG設定がSDK request bodyを記録することを初回統合で発見。
-  local-onlyではINFO、OpenAI/httpx/httpcoreはWARNINGに制限した。
-  最終35B/9B実走ログにbase64本文とSDK request optionsがないことを確認した。
-
-## 追加GUI検証 (2026-10-25 JST)
-
-ユーザーのGUI確認希望を受け、X11のデスクトップ上でRerun 0.15.1を実際に起動した。
-35Bの`scene_graph_full.rrd`を開き、GUIの3D点群・box/物体ラベル・関係entityとframe timelineを
-表示できることを画面キャプチャで確認した。通常起動した`Rerun Viewer`はユーザー操作用に開いたまま。
-物理的な関係の意味評価は従来のRESULTS.mdと同じで、この追加確認はGUI表示の確認である。
-
-```bash
-mkdir -p outputs/local-only/gui/config
-XDG_CONFIG_HOME="$PWD/outputs/local-only/gui/config" rerun analytics disable
-XDG_CONFIG_HOME="$PWD/outputs/local-only/gui/config" RERUN_ANALYTICS_ENABLED=false \
-  rerun --bind 127.0.0.1 --port 0 --threads 8 --window-size 1440x1000 \
-  outputs/local-only/m3/qwen35b-complete/scene_graph_full.rrd
-```
-
-既存のRerun設定を変更しないよう、専用の`XDG_CONFIG_HOME`でanalyticsを無効化した。
-`outputs/local-only/gui/rerun35b.png`が実際のGUI画面、`verification.json`がウィンドウ確認記録。
-GUIプロセスも`strace`で監査し、`viewer-network-audit.json`は外部接続先なし。
-
-`--screenshot-to`では画像の保存後、自動終了処理でRerun内部の`Option::unwrap()` panicを観測した。
-通常起動では再現せず、画面表示とウィンドウの継続稼働を確認した。
-Vulkanの`Unrecognized present mode`警告も記録したが、Driver/Toolkit/依存バージョンは変更していない。
-
-## 読みやすいScene Graph表示
-
-点群・全ラベルの重ね描きは関係を読み取りにくいため、保存mapから2Dのノード・矢印図を作る経路を追加した。
-新しい推論・検出・融合は行わない。Graphvizの`dot` (既存インストールを使用) でPNG/SVGを生成する。
-
-```bash
-MAP=outputs/local-only/assets/data/Replica/room0/exps/m3_qwen35b_complete/pcd_m3_qwen35b_complete.pkl.gz
-python scripts/local_only/draw_relation_graph.py "$MAP" outputs/local-only/relations35b
-# 全17物体も図に含める場合 (既定は関係のある5物体に絞る)
-python scripts/local_only/draw_relation_graph.py "$MAP" outputs/local-only/relations35b-all --include-isolated
-
-# 左: 2D関係図、右: 物体中心と矢印の3D表示、薄い点群を背景として記録する。
-RERUN_ANALYTICS_ENABLED=false python scripts/local_only/replay_rerun.py "$MAP" \
-  outputs/local-only/scene_graph_readable.rrd --presentation
-XDG_CONFIG_HOME="$PWD/outputs/local-only/gui/config" RERUN_ANALYTICS_ENABLED=false \
-  rerun --bind 127.0.0.1 --port 0 --threads 8 outputs/local-only/scene_graph_readable.rrd
-```
-
-実際に生成・GUI表示を確認したファイル:
-
-- `outputs/local-only/presentation/scene_graph_readable_diagram/relations.png` / `.svg`: 35B、5ノード・3エッジ。
-- 同ディレクトリの`objects.json`: 全17物体とCaption、`isolated_objects.txt`: 関係のない12物体。
-- `outputs/local-only/presentation/qwen9b/relations.png` / `.svg`: 9B、2ノード・1エッジ。
-- `outputs/local-only/presentation/scene_graph_readable.rrd`: 2D/3Dの左右分割blueprintを含む。
-- `outputs/local-only/presentation/viewer.png`: 新しい左右分割GUIの実画面。
-
-ノードの番号は保存物体ID、矢印はsource→target、括弧内は保存された関係の観測回数。
-観測回数は正解確率ではない。SVG上ではノードのtooltipから統合Captionを参照できる。
-関係のない物体を省くのは表示上の選択だけで、保存グラフにはノード・エッジを追加/削除しない。
-SVGのノード/矢印数と保存データを照合し、Rerunのblueprint・矢印記録も検査した。
-生成時・GUIとも外部通信なし。初回はOptionalReRun wrapper経由の定数参照で失敗したため、
-ViewCoordinates定数のみSDKを直接参照するよう修正した。元の表示経路は引き続き利用可能。
-
-既存の`visualize_cfslam_results.py`にも`G`キーで球/線のグラフを切り替える機能があるが、
-古い`object1/object2/object_relation`形式のedge JSONを前提とするため、そのまま今回のmapへは使わない。
-
-## room0の実行管理と現在の結果
-
-| 段階 | 結果 |
+| 症状 | 確認するもの |
 |---|---|
-| RGB-D取得 | 全2000組を取得し、CRC・幾何検証に合格 |
-| stride 20・100枚pilot | 61物体・25関係・1931対応検出、1146.5秒 |
-| 全2000枚の検出 | 完了、71物体・37491対応検出 |
-| 全2000枚のScene Graph | frame000099で停止。再開保留 |
-| stride 10・200枚reference | 73物体・39関係・3805対応検出、1803.5秒。問題付き完了 |
+| import失敗／コマンドなし | 共通準備、ENVIRONMENTの依存、選択中Conda環境 |
+| 元画像が見つからない | mapの`color_path`と実データ。別PCへのコピーだけでは絶対パスは直らない |
+| 11435が使用中 | 既存の所有プロセスを確認。勝手に停止せず、再利用するならcloud無効を確認 |
+| settings changed | 設定変更は新run、入力／prepare条件変更は新root |
+| infer中断 | `state.json`と`vlm_cache/failed_*.json`。同じコマンドでcache再開 |
+| Caption欠落・関係の逆向き | 実応答と理由文。形式検証のPASSとは別に確認 |
+| mappingが止まった | `mapping.log`、`network.jsonl`、`network.strace`。融合は先頭から再計算 |
+| GUIが開かない／重い | デスクトップ接続、bwrap、ソフトウェア描画。まず`diagram.png`や`evidence.md`で確認 |
 
-`scripts/local_only/run_full_room0.py`は、通常モードではpilot検出→pilot graph→全検出→全graphを実行する。
-`--reference-only`はstride 10の200枚graphだけを実行し、2000枚段階へ進まない。
-検出/VLMキャッシュと検証済み段階を再利用するが、失敗段階の融合は先頭から再計算する。
-旧方針のgraphを現在の`upstream`方針で検証済みとは扱わない。
-
-状態・証拠:
-
-- `outputs/local-only/full_room0/state.json`: 旧2000枚実験の停止状態。
-- `outputs/local-only/reference_room0/state.json`: 200枚実験の問題付き完了。
-- 各rootの`resources.jsonl`: GPU・RAM・ディスク推移。
-- 各rootの`<stage>/attemptN/`: 設定・ソースSHA256・監査・検証ログ。
-- `outputs/local-only/assets/data/Replica/room0/exps/room0_<stage>_attemptN/`: 地図・元RRD・進捗・完了記録。
-
-200枚実験で使用したコマンド（実行済み。再実行する必要はない）:
-
-```bash
-PYTHONPATH= PYTHONNOUSERSITE=1 OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 \
-  conda run --no-capture-output -n conceptgraph-local \
-  python scripts/local_only/run_full_room0.py --reference-only \
-  --root outputs/local-only/reference_room0 \
-  --ollama-models /usr/share/ollama/.ollama/models
-```
-
-同じrootの検証済み段階は再利用される。別rootだけを指定しても、実験名の完全な分離にはならないため、
-新規比較を行う際は`exp_suffix`と出力先の衝突も確認する。
-`--ollama-models`はこのPCの既存モデル配置。再ダウンロードはしない。
-一時Ollamaは127.0.0.1:11435、クラウド無効、context 16384。既存サービスは変更しない。
-実行ラッパーはGitコマンドの代わりに実行ソースのSHA256を記録する。
-
-明示的な全2000枚の設定は`rerun_local_room0_full.yaml`（stride 1）。
-250フレームごとに関係を含む地図を原子的に保存し、巨大なフレーム別pklは作らない。
-全2000枚の再開はユーザーが見積もりを聞いて判断する方針で、現在は行わない。
-
-## 現在のローカルVLMモード
-
-既定は`vlm.response_policy=upstream`、出力検証を理由とした自動再生成は0回。
-元のタスクプロンプトを使い、JSONの受け渡し形式だけを追加指定する。
-関係・Captionは使える項目を残し、不正項目を理由付きで除外する。
-Captionの名前を検出クラスへ固定せず、欠落は既存のnull補完を使用する。
-API/解析の失敗はその応答の失敗として保存する。接続先・クラウド・禁止通信などの制約違反は停止する。
-
-| ログ・状態 | 意味 |
-|---|---|
-| `failed_<task>_*.json` | 推論/API/解析失敗。正常キャッシュへは保存しない |
-| `rejected_relations.jsonl` / `rejected_captions.jsonl` | 除外項目と理由 |
-| `missing_captions.jsonl` | 欠落した検出ID |
-| `response_events.jsonl` | キャッシュ使用を含む応答単位の状態・件数 |
-| 成功/部分応答キャッシュ | 元応答、採用結果、除外/欠落、プロンプト、画像SHA256とメッセージ構成 |
-| `completion.json`の`vlm` | 失敗・除外・欠落・空の統合結果などの集計 |
-| `completed_with_vlm_issues` | 保存まで完了したがVLMの問題あり。全件正常の`completed`と区別 |
-
-厳密な旧挙動の診断には`vlm.response_policy=strict`を明示する。
-さらに`vlm.invalid_relation_policy=error`なら、除外済みキャッシュの元応答も検証する。
-`log_and_drop`なら対象外IDを除外する。strictの残りの検証条件は維持される。
-通常モードと診断モードのプロンプト・キャッシュを混同しない。
-
-35B・既存rawキャッシュ・stride 10の設定は`rerun_local_scene_graph_reference`。
-通常設定も元の関係表示閾値2を使い、1回観測の関係を表示する場合だけ`rerun_edge_min_detections=1`を指定する。
-修正範囲と維持した差は[BEHAVIOR_AUDIT.md](BEHAVIOR_AUDIT.md)を参照。
-
-## 200枚の元RGB付き表示とCaption救済
-
-200枚実験の出力:
-`outputs/local-only/assets/data/Replica/room0/exps/room0_reference_graph_attempt1/`
-
-元RRDを、既存の`outputs/local-only/original_rgb_view/rgb_mapping.rbl`で開く。
-左上が入力RGB、左下が関係付き注釈、右が同時刻の3D地図。
-frame timeline 0〜199は間引き後の番号。GUI確認の記録は`outputs/local-only/reference_room0/view/`。
-元RRDはCaption本文を記録していないため、現在のGUIに説明文パネルはない。
-
-Captionに代わり`description`キーで返った説明文は、再推論なしで次のスクリプトからexportできる。
-実行済みのコマンド:
-
-```bash
-PYTHONPATH= PYTHONNOUSERSITE=1 \
-  conda run --no-capture-output -n conceptgraph-local \
-  python scripts/local_only/recover_saved_captions.py \
-  --cache-dir outputs/local-only/full_room0/vlm_cache \
-  --experiment room0_reference_graph_attempt1 \
-  --map outputs/local-only/assets/data/Replica/room0/exps/room0_reference_graph_attempt1/pcd_room0_reference_graph_attempt1.pkl.gz \
-  --output outputs/local-only/reference_room0/caption_recovery
-```
-
-`--output`は既存ディレクトリへの上書きを拒否する。元地図・キャッシュ・RRDは変更しない。
-出力は`captions.md`（物体別一覧）、`objects.json`（観測と出典）、`frames.json`、`summary.json`。
-統合Captionの再生成やGUIへの反映は行わない。救済件数は[RESULTS.md](RESULTS.md)を参照。
-
-論文方式の別ルートは[PAPER_SCENEGRAPH_PLAN.md](PAPER_SCENEGRAPH_PLAN.md)を参照。
-現段階は計画のみで、実装・推論は未着手。
+通常のリアルタイムVLM方針は`upstream`で、不正項目を記録・除外し欠落Captionをnull補完する。自動再生成0回。
+`completion.json`の`vlm`と`rejected_*.jsonl`・`missing_captions.jsonl`を確認し、`completed_with_vlm_issues`を全件正常と扱わない。
